@@ -1,0 +1,14 @@
+[Unit]
+Description=Team Agent Relay (千问 <-> Claude Code/opencode 中转服务)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/vol-eltaah12/finaagent/relay-service
+EnvironmentFile=/mnt/vol-eltaah12/workspace/relay.env
+ExecStart=/mnt/vol-eltaah12/finaagent/.venv/bin/python -m uvicorn app.entry:app --host 0.0.0.0 --port 8787
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

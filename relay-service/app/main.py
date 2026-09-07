@@ -1,0 +1,1186 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import time
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
+
+from .audit import AuditLog
+from . import shared_knowledge
+from .config import Settings
+from .db import DB
+from .events import TERMINAL, EventBus
+
+# 执行结束即关闭 SSE 流（review 表示执行完成、待人工确认）
+STREAM_END = TERMINAL | {"review"}
+DASH_COOKIE = "relay_dash"
+DASH_TTL = 12 * 3600
+MAX_FILE_BYTES = 1 * 1024 * 1024  # 文件上传/下载通道单文件上限 1MB
+
+LOGIN_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>团队中转服务 · 登录</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:#0f172a;color:#e2e8f0;font:15px/1.6 system-ui,"PingFang SC","Microsoft YaHei",sans-serif}
+.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:36px 40px;width:340px}
+h1{font-size:17px;margin:0 0 6px}p{font-size:13px;color:#94a3b8;margin:0 0 22px}
+input{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #475569;
+background:#0f172a;color:#e2e8f0;font-size:15px;margin-bottom:14px}
+button{width:100%;padding:10px;border:0;border-radius:8px;background:#2563eb;color:#fff;
+font-size:15px;cursor:pointer}button:hover{background:#1d4ed8}
+.err{color:#f87171;font-size:13px;margin-bottom:12px}
+</style></head><body>
+<form class="card" method="post" action="/login">
+<h1>团队中转服务</h1><p>输入访问口令</p>
+__ERR__
+<input type="password" name="password" placeholder="访问口令" autofocus required>
+<button type="submit">进入</button>
+</form></body></html>"""
+
+
+DASH_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>团队中转服务 · 调用情况</title>
+<style>
+body{margin:0;background:#0f172a;color:#e2e8f0;font:14px/1.6 system-ui,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding:20px 16px 40px}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
+h1{font-size:18px;margin:0}
+sub{font-size:12px;color:#64748b;font-weight:400}
+a{color:#60a5fa;text-decoration:none;font-size:13px}
+nav{margin-left:20px}nav a{margin-right:18px;font-size:14px;color:#94a3b8}
+nav a.on{color:#e2e8f0;border-bottom:2px solid #60a5fa;padding-bottom:3px}
+code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+input{padding:8px 10px;border-radius:8px;border:1px solid #475569;background:#0f172a;color:#e2e8f0;font-size:14px}
+button{padding:8px 16px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}
+a.act{margin-right:12px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:18px}
+.card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:12px 14px}
+.card .k{font-size:12px;color:#94a3b8}.card .v{font-size:22px;font-weight:600;margin-top:2px}
+.card .s{font-size:12px;color:#64748b}
+h2{font-size:14px;color:#94a3b8;margin:22px 0 8px}
+table{width:100%;border-collapse:collapse;background:#1e293b;border:1px solid #334155;border-radius:10px;overflow:hidden}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #293548;font-size:13px}
+th{color:#94a3b8;font-weight:500;background:#16213a}
+tr:last-child td{border-bottom:0}
+td.desc{max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.b{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px}
+.done{background:#14532d;color:#4ade80}.review{background:#1e3a8a;color:#93c5fd}
+.running{background:#164e63;color:#67e8f9}.queued{background:#334155;color:#cbd5e1}
+.failed{background:#7f1d1d;color:#fca5a5}.conflict{background:#78350f;color:#fcd34d}
+.cancelled{background:#334155;color:#94a3b8}.pending_approval{background:#713f12;color:#fde047}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+</style></head><body><div class="wrap">
+<header><h1>团队中转服务 <sub id="upd"></sub></h1>
+<nav><a href="#" id="tab-metrics" class="on">调用情况</a><a href="#" id="tab-tokens">凭证管理</a><a href="#" id="tab-shared">共享知识</a></nav>
+<a href="/logout">退出</a></header>
+<div id="view-metrics">
+<div class="cards" id="cards"></div>
+<h2>各状态任务</h2><div id="dist" style="font-size:13px"></div>
+<h2>按用户（近 7 天）</h2><div id="users"></div>
+<h2>最近任务</h2><div id="tasks"></div>
+</div>
+<div id="view-tokens" style="display:none">
+<h2>新建凭证</h2>
+<div style="display:flex;gap:8px;margin-bottom:14px">
+<input id="newname" placeholder="成员姓名，如：王洪彬" style="flex:1">
+<button id="btn-new">创建</button>
+</div>
+<div id="newtok" style="display:none;background:#14532d;border:1px solid #166534;border-radius:10px;padding:14px;margin-bottom:16px"></div>
+<h2>现有凭证</h2><div id="toks"></div>
+<p style="font-size:12px;color:#64748b;margin-top:14px">token 是成员的访问凭证，请通过私聊发给本人。重置＝换新（旧 token 立即失效）；删除后该成员不能再提交任务，历史任务记录保留。完整 token 只在生成时显示一次。</p>
+</div>
+<div id="view-shared" style="display:none">
+<p style="font-size:13px;color:#94a3b8">共享知识<b>取消隔离</b>：任何人上传即团队全员可用，<b>下一个任务自动加载、立即生效</b>（无需重启服务）。
+技能→agent 技能列表；MCP→工具服务器；记忆→注入每次会话的 AGENTS.md。</p>
+<h2>技能（Skills）</h2><div id="sh-skills"></div>
+<div style="display:flex;gap:8px;margin:10px 0 18px;flex-wrap:wrap">
+<input id="sh-skill-name" placeholder="技能名，如 my-tool" style="flex:1;min-width:140px">
+<input id="sh-skill-file" placeholder="skill 内文件路径（默认 SKILL.md，可传 assets/xx）" style="flex:2;min-width:200px">
+<input type="file" id="sh-skill-f">
+<button id="btn-sh-skill">上传</button>
+</div>
+<h2>MCP 服务器</h2><div id="sh-mcp"></div>
+<div style="display:flex;gap:8px;margin:10px 0 6px">
+<input id="sh-mcp-name" placeholder="服务器名，如 ping" style="flex:1;min-width:140px">
+<button id="btn-sh-mcp">上传</button>
+</div>
+<textarea id="sh-mcp-json" rows="3" placeholder='opencode mcp 条目 JSON，如 {"type":"local","command":["python3","/path/server.py"],"enabled":true} 或 {"type":"remote","url":"http://..."}' style="width:100%;box-sizing:border-box;margin-bottom:18px;font-family:ui-monospace,Menlo,monospace;font-size:12px"></textarea>
+<h2>团队记忆（Memory）</h2><div id="sh-memory"></div>
+<div style="display:flex;gap:8px;margin:10px 0 6px">
+<input id="sh-mem-name" placeholder="记忆名，如 project-conventions" style="flex:1;min-width:160px">
+<button id="btn-sh-mem">上传</button>
+</div>
+<textarea id="sh-mem-text" rows="4" placeholder="Markdown 正文（会原样注入每个成员 agent 的 AGENTS.md）" style="width:100%;box-sizing:border-box;margin-bottom:18px"></textarea>
+<div id="sh-view" style="display:none"><h2 id="sh-view-title"></h2>
+<pre id="sh-view-body" style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:12px;white-space:pre-wrap;word-break:break-all;font-size:12px;max-height:420px;overflow:auto"></pre>
+<a href="#" id="sh-view-close">关闭预览</a></div>
+</div>
+</div>
+<script>
+const ST={done:"已完成",review:"待检查",running:"执行中",queued:"排队中",failed:"失败",
+conflict:"冲突",cancelled:"已取消",pending_approval:"待审批"};
+function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function badge(s){return `<span class="b ${esc(s)}">${ST[s]||esc(s)}</span>`}
+function fmtT(t){if(!t)return"-";const d=new Date(t*1000);
+return d.toLocaleDateString("zh",{month:"2-digit",day:"2-digit"})+" "+d.toLocaleTimeString("zh",{hour12:false})}
+async function refresh(){
+ try{
+  const r=await fetch("/dashboard/data");if(!r.ok)throw 0;const d=await r.json();
+  const m=d.metrics,t7=m.last_7d,td=m.today;
+  document.getElementById("cards").innerHTML=[
+   ["运行/排队",`${m.active} / ${m.queued}`,"上限 "+m.max_concurrent],
+   ["今日任务",td.submitted,"完成率 "+Math.round((td.done_rate||0)*100)+"%"],
+   ["近 7 天",t7.submitted,"完成率 "+Math.round((t7.done_rate||0)*100)+"%"],
+   ["已运行",Math.floor(m.uptime_seconds/3600)+"h "+Math.floor(m.uptime_seconds%3600/60)+"m",m.engine],
+  ].map(([k,v,s])=>`<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join("");
+  document.getElementById("dist").innerHTML=Object.entries(m.tasks)
+   .map(([s,n])=>`${badge(s)} ${n}`).join("　")||"无任务";
+  document.getElementById("users").innerHTML=`<table><tr><th>用户</th><th class="num">任务</th>
+   <th class="num">完成</th><th class="num">完成率</th><th class="num">tokens</th></tr>`+
+   (d.report.by_user||[]).map(u=>`<tr><td>${esc(u.user)}</td><td class="num">${u.tasks}</td>
+   <td class="num">${u.done}</td><td class="num">${Math.round((u.done_rate||0)*100)}%</td>
+   <td class="num">${u.tokens||0}</td></tr>`).join("")+"</table>";
+  document.getElementById("tasks").innerHTML=`<table><tr><th>#</th><th>用户</th><th>状态</th><th>备注</th>
+    <th>任务</th><th>提交</th><th>结束</th><th class="num">tokens</th></tr>`+
+   (d.tasks||[]).map(t=>`<tr><td>${t.id}</td><td>${esc(t.user)}</td><td>${badge(t.status)}</td>
+    <td style="font-size:12px;color:#94a3b8" title="${esc(t.error||'')}">${esc((t.error||'').slice(0,24))}</td>
+    <td class="desc" title="${esc(t.description)}">${esc(t.description)}</td>
+    <td>${fmtT(t.created_at)}</td><td>${fmtT(t.finished_at)}</td><td class="num">${t.tokens||0}</td></tr>`).join("")
+    +"</table>";
+  document.getElementById("upd").textContent="更新于 "+new Date().toLocaleTimeString("zh",{hour12:false});
+ }catch(e){}
+}
+function showTab(v){
+  document.getElementById("view-metrics").style.display=v==="m"?"":"none";
+  document.getElementById("view-tokens").style.display=v==="t"?"":"none";
+  document.getElementById("view-shared").style.display=v==="s"?"":"none";
+  document.getElementById("tab-metrics").className=v==="m"?"on":"";
+  document.getElementById("tab-tokens").className=v==="t"?"on":"";
+  document.getElementById("tab-shared").className=v==="s"?"on":"";
+  if(v==="t")refreshTokens();
+  if(v==="s")refreshShared();
+}
+document.getElementById("tab-metrics").addEventListener("click",e=>{e.preventDefault();showTab("m")});
+document.getElementById("tab-tokens").addEventListener("click",e=>{e.preventDefault();showTab("t")});
+document.getElementById("tab-shared").addEventListener("click",e=>{e.preventDefault();showTab("s")});
+async function refreshShared(){
+ try{
+  const r=await fetch("/dashboard/shared");if(!r.ok)throw 0;const d=await r.json();
+  document.getElementById("sh-skills").innerHTML=d.skills.length
+   ?`<table><tr><th>名称</th><th>说明</th><th>文件</th><th>操作</th></tr>`+d.skills.map(s=>
+     `<tr><td><code>${esc(s.name)}</code></td>
+      <td style="font-size:12px;color:#94a3b8" title="${esc(s.description)}">${esc((s.description||"").slice(0,70))}</td>
+      <td style="font-size:12px;color:#94a3b8">${esc(s.files.join(", ").slice(0,90))}</td>
+      <td><a href="#" class="act" data-k="view-skill" data-n="${esc(s.name)}" data-f="SKILL.md">查看</a>
+      <a href="#" class="act" data-k="del-skill" data-n="${esc(s.name)}" style="color:#f87171">删除</a></td></tr>`).join("")+"</table>"
+   :'<p style="font-size:13px;color:#64748b">暂无技能。上传后出现在全员 agent 的技能列表（SKILL.md 需含 name/description frontmatter）</p>';
+  document.getElementById("sh-mcp").innerHTML=d.mcp.length
+   ?`<table><tr><th>名称</th><th>概要</th><th>操作</th></tr>`+d.mcp.map(s=>
+     `<tr><td><code>${esc(s.name)}</code></td>
+      <td style="font-size:12px;color:#94a3b8">${esc(s.summary||JSON.stringify(s.config||{}).slice(0,80))}</td>
+      <td><a href="#" class="act" data-k="view-mcp" data-n="${esc(s.name)}">查看</a>
+      <a href="#" class="act" data-k="del-mcp" data-n="${esc(s.name)}" style="color:#f87171">删除</a></td></tr>`).join("")+"</table>"
+   :'<p style="font-size:13px;color:#64748b">暂无 MCP 服务器。上传后全员 agent 下次任务即可调用其工具</p>';
+  document.getElementById("sh-memory").innerHTML=d.memory.length
+   ?`<table><tr><th>名称</th><th class="num">大小</th><th>更新</th><th>操作</th></tr>`+d.memory.map(s=>
+     `<tr><td><code>${esc(s.name)}</code></td><td class="num">${s.size}B</td><td>${fmtT(s.mtime)}</td>
+      <td><a href="#" class="act" data-k="view-mem" data-n="${esc(s.name)}">查看</a>
+      <a href="#" class="act" data-k="del-mem" data-n="${esc(s.name)}" style="color:#f87171">删除</a></td></tr>`).join("")+"</table>"
+   :'<p style="font-size:13px;color:#64748b">暂无团队记忆。上传后自动注入每个成员 agent 的 AGENTS.md</p>';
+ }catch(e){}
+}
+document.getElementById("view-shared").addEventListener("click",async e=>{
+ const a=e.target.closest("a.act");if(!a)return;e.preventDefault();
+ const k=a.dataset.k,n=a.dataset.n;
+ if(k.startsWith("view-")){
+  const file=a.dataset.f||"";
+  const r=await fetch(`/dashboard/shared/content?kind=${k.slice(5)}&name=${encodeURIComponent(n)}&file=${encodeURIComponent(file)}`);
+  if(!r.ok){alert("读取失败: "+r.status);return;}
+  const d=await r.json();
+  document.getElementById("sh-view-title").textContent=`${d.kind} / ${d.name}${file?" / "+file:""}`;
+  document.getElementById("sh-view-body").textContent=d.content;
+  document.getElementById("sh-view").style.display="";
+  return;
+ }
+ const delMap={"del-skill":["skills",`删除技能 ${n}？全员将不再加载它。`],
+               "del-mcp":["mcp",`删除 MCP ${n}？全员将不再使用它。`],
+               "del-mem":["memory",`删除记忆 ${n}？`]};
+  const m=delMap[k];if(!m)return;
+  if(!confirm(m[1]))return;
+  const r=await fetch(`/dashboard/shared/${m[0]}/${encodeURIComponent(n)}`,{method:"DELETE"});
+  if(!r.ok){alert("删除失败: "+r.status);return;}
+  refreshShared();
+});
+document.getElementById("sh-view-close").addEventListener("click",e=>{
+ e.preventDefault();document.getElementById("sh-view").style.display="none";
+});
+document.getElementById("btn-sh-skill").addEventListener("click",async()=>{
+ const name=document.getElementById("sh-skill-name").value.trim();
+ const f=document.getElementById("sh-skill-f").files[0];
+ const fp=document.getElementById("sh-skill-file").value.trim()||"SKILL.md";
+ if(!name||!f){alert("请填写技能名并选择文件");return;}
+ const b64=await new Promise((res,rej)=>{
+  const fr=new FileReader();fr.onload=()=>res(String(fr.result).split(",")[1]);
+  fr.onerror=rej;fr.readAsDataURL(f);
+ });
+ const r=await fetch("/dashboard/shared/skills",{method:"POST",
+  headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({name,file:fp,content_b64:b64})});
+ if(!r.ok){alert("上传失败: "+r.status);return;}
+ alert("上传成功，立即生效（下一个任务自动加载）");
+ document.getElementById("sh-skill-f").value="";
+ refreshShared();
+});
+document.getElementById("btn-sh-mcp").addEventListener("click",async()=>{
+ const name=document.getElementById("sh-mcp-name").value.trim();
+ const txt=document.getElementById("sh-mcp-json").value.trim();
+ let cfg;try{cfg=JSON.parse(txt)}catch(e){alert("JSON 格式错误");return;}
+ if(!name||typeof cfg!=="object"||Array.isArray(cfg)){alert("请填写服务器名和有效 JSON 对象");return;}
+ const r=await fetch("/dashboard/shared/mcp",{method:"POST",
+  headers:{"Content-Type":"application/json"},body:JSON.stringify({name,config:cfg})});
+ if(!r.ok){alert("上传失败: "+r.status);return;}
+ alert("上传成功，立即生效（下一个任务自动加载）");
+ refreshShared();
+});
+document.getElementById("btn-sh-mem").addEventListener("click",async()=>{
+ const name=document.getElementById("sh-mem-name").value.trim();
+ const txt=document.getElementById("sh-mem-text").value;
+ if(!name||!txt.trim()){alert("请填写记忆名和内容");return;}
+ const r=await fetch("/dashboard/shared/memory",{method:"POST",
+  headers:{"Content-Type":"application/json"},body:JSON.stringify({name,content:txt})});
+ if(!r.ok){alert("上传失败: "+r.status);return;}
+ alert("上传成功，立即生效（下一个任务自动注入全员 agent）");
+ refreshShared();
+});
+async function refreshTokens(){
+ try{
+  const r=await fetch("/dashboard/tokens");if(!r.ok)throw 0;const d=await r.json();
+  const us=d.users||[];
+  const rows=us.map(u=>`<tr><td>${esc(u.name)}</td><td><code>${esc(u.token)}</code></td>
+   <td>${fmtT(u.created_at)}</td><td class="num">${u.tasks_7d}</td><td class="num">${u.done_7d}</td>
+   <td><a href="#" class="act" data-a="regen" data-n="${esc(u.name)}">重置</a>
+   <a href="#" class="act" data-a="del" data-n="${esc(u.name)}" style="color:#f87171">删除</a></td></tr>`).join("");
+  document.getElementById("toks").innerHTML=rows
+   ?`<table><tr><th>用户</th><th>token</th><th>签发时间</th><th class="num">近7天任务</th><th class="num">完成</th><th>操作</th></tr>${rows}</table>`
+   :'<p style="font-size:13px;color:#64748b">暂无成员</p>';
+ }catch(e){}
+}
+function showNewTok(d){
+ const box=document.getElementById("newtok");
+ box.style.display="";
+ box.innerHTML=`<div style="font-size:13px;color:#86efac;margin-bottom:8px"><b>${esc(d.name)}</b> 的凭证已生成。token 仅显示这一次，请立即通过私聊发给本人保存：</div>
+ <div style="display:flex;gap:8px;align-items:flex-start"><code id="toktxt" style="flex:1;font-size:13px;color:#e2e8f0;background:#0f172a;padding:8px 10px;border-radius:8px;word-break:break-all">${esc(d.token)}</code>
+ <button onclick="copyTok()" style="background:#16a34a">复制</button></div>`;
+}
+function copyTok(){
+ const t=document.getElementById("toktxt").textContent;
+ const done=()=>alert("已复制到剪贴板");
+ const bad=()=>alert("自动复制失败，请手动选中复制");
+ if(navigator.clipboard && window.isSecureContext){
+  navigator.clipboard.writeText(t).then(done,bad);
+ }else{
+  const ta=document.createElement("textarea");
+  ta.value=t;ta.style.position="fixed";ta.style.opacity="0";
+  document.body.appendChild(ta);ta.select();
+  let ok=false;try{ok=document.execCommand("copy")}catch(e){}
+  document.body.removeChild(ta);ok?done():bad();
+ }
+}
+document.getElementById("toks").addEventListener("click",async e=>{
+ const a=e.target.closest("a.act");if(!a)return;e.preventDefault();
+ const n=a.dataset.n;
+ if(a.dataset.a==="regen"){
+  if(!confirm(`重置 ${n} 的 token？旧 token 立即失效，需要把新 token 重新发给 ${n}。`))return;
+  const r=await fetch(`/dashboard/tokens/${encodeURIComponent(n)}/regenerate`,{method:"POST"});
+  if(!r.ok){alert("重置失败: "+r.status);return;}
+  showNewTok(await r.json());refreshTokens();
+ }else if(a.dataset.a==="del"){
+  if(!confirm(`删除 ${n} 的凭证？删除后其 token 立即失效（历史任务记录保留）。`))return;
+  const r=await fetch(`/dashboard/tokens/${encodeURIComponent(n)}`,{method:"DELETE"});
+  if(!r.ok){alert("删除失败: "+r.status);return;}
+  refreshTokens();
+ }
+});
+document.getElementById("btn-new").addEventListener("click",async()=>{
+ const n=document.getElementById("newname").value.trim();if(!n)return;
+ const r=await fetch("/dashboard/tokens",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n})});
+ if(r.status===409){alert("该用户已存在");return;}
+ if(!r.ok){alert("创建失败: "+r.status);return;}
+ const d=await r.json();
+ document.getElementById("newname").value="";
+ showNewTok(d);refreshTokens();
+});
+refresh();setInterval(()=>{refresh();if(document.getElementById("view-tokens").style.display!=="none")refreshTokens()},10000);
+</script></body></html>"""
+from .executor import Executor
+from .scheduler import Scheduler
+from .targets import find_conflicts
+from .workspace import Workspace
+
+
+def build_prompt(row: dict, cfg: Settings) -> str:
+    targets = ", ".join(row["targets"]) or "（未声明；按任务描述判断，尽量不触碰共享区）"
+    p = (
+        f"任务：{row['description']}\n"
+        f"本任务声明的改动目标：{targets}\n"
+        f"团队共享区：{cfg.shared_dir}\n"
+        f"  - 共享知识已自动加载进本次会话：技能 {cfg.shared_dir}/skills/、"
+        f"MCP 工具 {cfg.shared_dir}/mcp/、团队记忆 {cfg.shared_dir}/memory/（已并入 AGENTS.md）\n"
+        f"  - 知识库文档 {cfg.shared_dir}/knowledge/：动手前可先查阅；"
+        f"产生的可复用经验沉淀到对应主题目录\n"
+        f"完成后用 2-5 句话总结：做了什么、改了哪些文件。"
+    )
+    if row.get("resume_from"):
+        p = f"接续任务 #{row['resume_from']} 的会话，追加要求：\n" + p
+    return p
+
+
+class NewTask(BaseModel):
+    description: str
+    project: str = ""
+    targets: list[str] = Field(default_factory=list)
+    priority: str = "normal"  # normal | urgent
+    force: bool = False
+    resume_from: int | None = None
+
+
+class NewUser(BaseModel):
+    name: str
+
+
+class ConfirmBody(BaseModel):
+    outcome: str = "done"  # done | conflict
+
+
+class ApproveBody(BaseModel):
+    decision: str  # approve | deny
+
+
+class UploadFileBody(BaseModel):
+    path: str
+    content_b64: str
+
+
+class SharedSkillUpload(BaseModel):
+    name: str
+    content_b64: str
+    file: str = "SKILL.md"  # skill 目录内相对路径（默认 SKILL.md，可传 assets/xxx）
+
+
+class SharedMcpUpload(BaseModel):
+    name: str
+    config: dict  # opencode mcp 条目，如 {"type":"local","command":[...],"enabled":true}
+
+
+class SharedMemoryUpload(BaseModel):
+    name: str
+    content: str  # markdown 正文
+
+
+class DashTokenBody(BaseModel):
+    name: str
+
+
+def _shared_path(shared_dir: str, rel: str) -> str:
+    """把相对路径解析到共享区内；拒绝绝对路径、任何路径穿越与 secrets/ 凭证目录。"""
+    rel = (rel or "").strip()
+    if not rel or rel.startswith("/") or "\x00" in rel:
+        raise HTTPException(status_code=400, detail="path must be relative to shared dir")
+    norm = os.path.normpath(rel)
+    if norm == ".." or norm.startswith(".." + os.sep):
+        raise HTTPException(status_code=400, detail="path traversal not allowed")
+    base = os.path.realpath(shared_dir)
+    full = os.path.realpath(os.path.join(base, norm))
+    if not (full == base or full.startswith(base + os.sep)):
+        raise HTTPException(status_code=400, detail="path escapes shared dir")
+    secrets_root = os.path.realpath(os.path.join(base, "secrets"))
+    if full == secrets_root or full.startswith(secrets_root + os.sep):
+        raise HTTPException(status_code=403,
+                            detail="secrets dir is not accessible via files API")
+    return full
+
+
+def _service_version() -> str:
+    """读取部署时写入的 VERSION（git SHA）；开发树无此文件时为 dev。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        with open(os.path.join(root, "VERSION"), encoding="utf-8") as f:
+            return f.read().strip()[:64] or "dev"
+    except OSError:
+        return "dev"
+
+
+def _launch_boot(boot: str) -> tuple[bool, str]:
+    """在独立 cgroup 中触发 bootloader（须活过 relay 自身重启）。
+
+    首选 systemd-run 瞬态单元（同名单元防并发重入）；无 systemd 时退化为
+    脱离会话的后台进程（开发环境用；生产重启时可能被 cgroup 连带回收）。
+    """
+    if not os.environ.get("RELAY_BOOT_NOSYSTEMD"):
+        try:
+            p = subprocess.run(
+                ["systemd-run", "--unit=relay-boot-manual", "--collect", boot, "update"],
+                capture_output=True, text=True, timeout=15)
+            if p.returncode == 0:
+                return True, "systemd-run:relay-boot-manual"
+            if "already" in (p.stderr or "").lower():
+                return False, "update already in progress"
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        lf = open("/tmp/relay-boot-manual.log", "ab")
+        subprocess.Popen([boot, "update"], stdout=lf, stderr=lf,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+        return True, "detached"
+    except OSError as e:
+        return False, f"launch failed: {e!r}"
+
+
+def sweep_stale(db, bus, audit, cfg) -> list[int]:
+    """把停留超时（created_at 早于阈值）的 review/待审批 任务自动置为 done 并标记。
+
+    返回被清扫的 task_id 列表。
+    """
+    cutoff = time.time() - cfg.stale_timeout_hours * 3600
+    swept: list[int] = []
+    for t in db.stale_tasks(["review", "pending_approval"], cutoff):
+        if db.mark_stale_done(t["id"], "超时自动done"):
+            bus.publish(t["id"], t="status", s="done", error="超时自动done")
+            audit.line(t["id"], t["user"], "auto_done_timeout",
+                       f"停留超过 {cfg.stale_timeout_hours:g}h，超时自动done")
+            swept.append(t["id"])
+    return swept
+
+
+def create_app(cfg: Settings | None = None) -> FastAPI:
+    cfg = cfg or Settings.from_env()
+    for d in (cfg.shared_dir, cfg.task_root, cfg.users_root):
+        os.makedirs(d, exist_ok=True)
+    os.makedirs(os.path.join(cfg.shared_dir, "knowledge"), exist_ok=True)
+
+    db = DB(cfg.db_path)
+    bus = EventBus(cfg.event_history_max)
+    ws = Workspace(cfg, db)
+    ex = Executor(cfg)
+    audit = AuditLog(cfg.log_path)
+    cancel_events: dict[int, asyncio.Event] = {}
+    sched: Scheduler | None = None  # set in lifespan
+    started_at = time.monotonic()
+
+    async def run_task(task_id: int) -> None:
+        row = db.task(task_id)
+        if row is None or row["status"] != "queued":
+            return
+        prev = db.task(row["resume_from"]) if row.get("resume_from") else None
+        self_resume = bool(row.get("resume_hint"))
+        if self_resume:
+            reuse_workdir = row.get("workdir") or None
+            resume_session = row.get("session_id") or None
+            data_dir = os.path.join(row["workdir"], "data") if row.get("workdir") else None
+            prompt = row["resume_hint"]
+            exempt_cmd = row.get("blocked_cmd") or None
+        else:
+            reuse_workdir = prev["workdir"] if (prev and prev.get("workdir")) else None
+            resume_session = (prev.get("session_id") or None) if prev else None
+            data_dir = os.path.join(prev["workdir"], "data") if (prev and prev.get("workdir")) else None
+            prompt = build_prompt(row, cfg)
+            exempt_cmd = None
+        workdir = ws.prepare(row, reuse_workdir=reuse_workdir)
+        row = db.task(task_id)  # 刷新：拿到 prepare 写入的 workdir
+        cancel = cancel_events.setdefault(task_id, asyncio.Event())
+        db.set(task_id, status="running", started_at=time.time())
+        audit.line(task_id, row["user"], "start", workdir)
+        bus.publish(task_id, t="status", s="running")
+        res = await ex.run(
+            task_id=task_id,
+            workdir=workdir,
+            prompt=prompt,
+            resume_session=resume_session,
+            data_dir=data_dir,
+            cancel=cancel,
+            publish=bus.publish,
+            exempt_cmd=exempt_cmd,
+        )
+        finished = time.time()
+        db.set(task_id,
+               session_id=res.session_id or "",
+               result=res.text[-4000:],
+               tokens=res.tokens,
+               cost=res.cost,
+               resume_hint="")
+        if res.error and res.error.startswith("blocked:"):
+            db.set(task_id, status="pending_approval", error=res.error,
+                   blocked_cmd=res.blocked_cmd)
+            bus.publish(task_id, t="status", s="pending_approval",
+                        error=res.error, blocked_cmd=res.blocked_cmd)
+            audit.line(task_id, row["user"], "block", (res.blocked_cmd or "")[:200])
+            return
+        row = db.task(task_id)  # 刷新
+        scan = ws.scan(row)
+        conflicts = _check_conflicts(row, scan, finished)
+        if res.error == "cancelled":
+            status, err = "cancelled", "cancelled by user"
+        elif res.error:
+            status, err = "failed", res.error
+        elif conflicts:
+            status, err = "conflict", ""
+        elif not scan["all"]:
+            status, err = "done", "自动done（只读，无文件改动）"
+        else:
+            status, err = "review", ""
+        db.set(task_id, status=status, error=err, finished_at=finished,
+               conflicts=json.dumps(conflicts, ensure_ascii=False) if conflicts else "[]")
+        bus.publish(task_id, t="status", s=status,
+                    changed=scan["all"][:200], conflicts=conflicts)
+        audit.line(task_id, row["user"], "stop", status)
+        cancel_events.pop(task_id, None)
+
+    def _check_conflicts(row: dict, scan: dict, finished_at: float) -> list[dict]:
+        conflicts: list[dict] = []
+        for rel in scan["all"]:
+            for other in db.tasks_with_file(rel, exclude=row["id"]):
+                if other["status"] == "cancelled":
+                    continue
+                if not other["changed_files"]:
+                    continue
+                entry = {
+                    "file": rel,
+                    "with_task": other["id"],
+                    "with_user": other["user"],
+                    "backup": "",
+                    "note": "两个任务时间窗内都改动了同一文件",
+                }
+                if other.get("finished_at") and other["finished_at"] < finished_at:
+                    entry["backup"] = ws.backup_version(other, rel) or ""
+                    entry["note"] = f"任务 #{other['id']}（{other['user']}）先完成，其版本已备份，磁盘保留后写入版本"
+                else:
+                    entry["note"] = f"任务 #{other['id']}（{other['user']}）同时段也在改动该文件，完成时将互相备份"
+                if not any(c["with_task"] == other["id"] and c["file"] == rel for c in conflicts):
+                    conflicts.append(entry)
+                oc = list(other["conflicts"])
+                back = {
+                    "file": rel,
+                    "with_task": row["id"],
+                    "with_user": row["user"],
+                    "note": "有其它任务也在改动该文件，请人工核查",
+                }
+                if not any(c.get("with_task") == row["id"] and c.get("file") == rel for c in oc):
+                    oc.append(back)
+                    db.set(other["id"], conflicts=oc)
+        return conflicts
+
+    def _on_run_error(task_id: int, exc: Exception) -> None:
+        row = db.task(task_id)
+        if row and row["status"] not in TERMINAL:
+            db.set(task_id, status="failed", error=f"internal error: {exc!r}",
+                   finished_at=time.time())
+            bus.publish(task_id, t="status", s="failed", error=str(exc))
+        audit.line(task_id, row["user"] if row else "?", "error", repr(exc))
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        nonlocal sched
+        sched = Scheduler(cfg.max_concurrent, run_task, on_error=_on_run_error)
+        await sched.start()
+        stop = asyncio.Event()
+
+        async def sweeper():
+            while True:
+                try:
+                    sweep_stale(db, bus, audit, cfg)
+                except Exception as e:  # 清扫异常不拖垮服务
+                    audit.line(0, "__sweeper__", "error", repr(e))
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=cfg.sweep_interval_sec)
+                except asyncio.TimeoutError:
+                    continue
+                break  # stop 已置位，退出
+
+        sweeper_task = asyncio.create_task(sweeper())
+        yield
+        stop.set()
+        await sweeper_task
+        await sched.stop()
+        audit.close()
+        db.close()
+
+    app = FastAPI(title="team-agent relay", lifespan=lifespan)
+
+    def auth(authorization: str = Header(default="")) -> dict:
+        tok = authorization.strip()
+        if tok.lower().startswith("bearer "):
+            tok = tok[7:].strip()
+        if tok and tok == cfg.admin_token:
+            return {"name": "__admin__", "admin": True}
+        u = db.user_by_token(tok)
+        if not u:
+            raise HTTPException(status_code=401, detail="invalid or missing token")
+        return {"name": u["name"], "admin": False}
+
+    def require_admin(principal: dict = Depends(auth)) -> None:
+        if not principal["admin"]:
+            raise HTTPException(status_code=403, detail="admin token required")
+
+    # ---- 用户/凭证 ----
+
+    @app.get("/health")
+    async def health():
+        return {
+            "ok": True,
+            "engine": cfg.engine,
+            "version": _service_version(),
+            "active": sched.active if sched else 0,
+            "queued": sched.pending if sched else 0,
+            "max_concurrent": cfg.max_concurrent,
+        }
+
+    @app.get("/users")
+    async def list_users(_: None = Depends(require_admin)):
+        return {"users": db.list_users()}
+
+    @app.post("/users", status_code=201)
+    async def create_user(body: NewUser, _: None = Depends(require_admin)):
+        if db.user_by_name(body.name):
+            raise HTTPException(status_code=409, detail="user exists")
+        token = "ta_" + secrets.token_urlsafe(24)
+        db.create_user(body.name, token)
+        return {"name": body.name, "token": token}
+
+    @app.delete("/users/{name}")
+    async def delete_user(name: str, _: None = Depends(require_admin)):
+        if not db.user_by_name(name):
+            raise HTTPException(status_code=404, detail="user not found")
+        db.delete_user(name)
+        return {"ok": True, "name": name}
+
+    # ---- 任务 ----
+
+    @app.post("/tasks", status_code=202)
+    async def submit_task(body: NewTask, principal: dict = Depends(auth)):
+        if body.priority not in ("normal", "urgent"):
+            raise HTTPException(status_code=422, detail="priority must be normal|urgent")
+        if body.resume_from is not None and not db.task(body.resume_from):
+            raise HTTPException(status_code=404, detail="resume_from task not found")
+        warnings = []
+        if body.targets:
+            warnings = find_conflicts(body.targets, db.active_tasks())
+            if warnings and not body.force:
+                raise HTTPException(status_code=409, detail={
+                    "error": "targets overlap with in-flight tasks",
+                    "overlaps": warnings,
+                    "hint": "确认无误后带 force=true 重新提交，或等待在途任务完成",
+                })
+        task_id = db.create_task(
+            user=principal["name"],
+            description=body.description,
+            project=body.project,
+            targets=body.targets,
+            priority=body.priority,
+            resume_from=body.resume_from,
+        )
+        audit.line(task_id, principal["name"], "submit", body.description[:120])
+        bus.publish(task_id, t="status", s="queued")
+        await sched.submit(task_id, body.priority)
+        return {"task_id": task_id, "status": "queued", "warnings": warnings or None}
+
+    @app.get("/tasks")
+    async def list_tasks(status: str | None = None, limit: int = 50,
+                         _: dict = Depends(auth)):
+        return {"tasks": db.list_tasks(limit=limit, status=status)}
+
+    @app.get("/tasks/{task_id}")
+    async def get_task(task_id: int, _: dict = Depends(auth)):
+        row = db.task(task_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="task not found")
+        return row
+
+    @app.get("/tasks/{task_id}/diff")
+    async def task_diff(task_id: int, _: dict = Depends(auth)):
+        row = db.task(task_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="task not found")
+        return {"task_id": task_id, "changed_files": row["changed_files"],
+                "conflicts": row["conflicts"]}
+
+    @app.post("/tasks/{task_id}/cancel")
+    async def cancel_task(task_id: int, principal: dict = Depends(auth)):
+        row = db.task(task_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="task not found")
+        if row["status"] == "queued":
+            db.set(task_id, status="cancelled", error="cancelled before start")
+            audit.line(task_id, principal["name"], "cancel", "queued")
+            bus.publish(task_id, t="status", s="cancelled")
+            return {"task_id": task_id, "status": "cancelled"}
+        if row["status"] == "running":
+            cancel_events.setdefault(task_id, asyncio.Event()).set()
+            audit.line(task_id, principal["name"], "cancel", "running")
+            return {"task_id": task_id, "status": "cancelling"}
+        raise HTTPException(status_code=409,
+                            detail=f"task already {row['status']}, cannot cancel")
+
+    @app.post("/tasks/{task_id}/confirm")
+    async def confirm_task(task_id: int, body: ConfirmBody, _: dict = Depends(auth)):
+        row = db.task(task_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="task not found")
+        if row["status"] not in ("review", "conflict"):
+            raise HTTPException(status_code=409,
+                                detail=f"task is {row['status']}, confirm only from review/conflict")
+        if body.outcome not in ("done", "conflict"):
+            raise HTTPException(status_code=422, detail="outcome must be done|conflict")
+        db.set(task_id, status=body.outcome)
+        bus.publish(task_id, t="status", s=body.outcome)
+        audit.line(task_id, row["user"], "confirm", body.outcome)
+        return db.task(task_id)
+
+    @app.post("/tasks/{task_id}/approve")
+    async def approve_task(task_id: int, body: ApproveBody, principal: dict = Depends(auth)):
+        row = db.task(task_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="task not found")
+        if row["status"] != "pending_approval":
+            raise HTTPException(status_code=409,
+                                detail=f"task is {row['status']}, only pending_approval can be approved")
+        if body.decision not in ("approve", "deny"):
+            raise HTTPException(status_code=422, detail="decision must be approve|deny")
+        if body.decision == "deny":
+            db.set(task_id, status="failed", error="user denied blocked command",
+                   finished_at=time.time())
+            bus.publish(task_id, t="status", s="failed", error="user denied blocked command")
+            audit.line(task_id, principal["name"], "deny", (row["blocked_cmd"] or "")[:200])
+            return db.task(task_id)
+        hint = (f"上一次执行因高危命令被拦截，人工已批准执行以下命令：\n{row['blocked_cmd']}\n"
+                "请从该命令继续完成原任务。")
+        db.set(task_id, status="queued", error="", resume_hint=hint)
+        audit.line(task_id, principal["name"], "approve", (row["blocked_cmd"] or "")[:200])
+        bus.publish(task_id, t="status", s="queued")
+        await sched.submit(task_id, row["priority"])
+        return {"task_id": task_id, "status": "queued"}
+
+    @app.get("/tasks/{task_id}/stream")
+    async def stream_task(task_id: int, _: dict = Depends(auth)):
+        row = db.task(task_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="task not found")
+        history, q = bus.subscribe(task_id)
+
+        async def gen():
+            try:
+                async def emit(ev: dict):
+                    payload = json.dumps(ev, ensure_ascii=False)
+                    yield f"data: {payload}\n\n"
+
+                for ev in history:
+                    async for chunk in emit(ev):
+                        yield chunk
+                    if ev.get("t") == "status" and ev.get("s") in STREAM_END:
+                        return
+                while True:
+                    try:
+                        ev = await asyncio.wait_for(q.get(), timeout=15)
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+                        continue
+                    async for chunk in emit(ev):
+                        yield chunk
+                    if ev.get("t") == "status" and ev.get("s") in STREAM_END:
+                        return
+            finally:
+                bus.unsubscribe(task_id, q)
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # ---- 文件上传/下载（共享区，单文件 ≤1MB） ----
+
+    @app.post("/files", status_code=201)
+    async def upload_file(body: UploadFileBody, principal: dict = Depends(auth)):
+        full = _shared_path(cfg.shared_dir, body.path)
+        try:
+            data = base64.b64decode(body.content_b64, validate=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid base64 content")
+        if len(data) > MAX_FILE_BYTES:
+            raise HTTPException(status_code=413,
+                                detail=f"file size {len(data)} exceeds limit {MAX_FILE_BYTES} bytes (1MB)")
+        os.makedirs(os.path.dirname(full) or cfg.shared_dir, exist_ok=True)
+        with open(full, "wb") as f:
+            f.write(data)
+        audit.line(0, principal["name"], "file_upload", f"{body.path} ({len(data)}B)")
+        return {"ok": True, "path": body.path, "size": len(data)}
+
+    @app.get("/files")
+    async def download_file(path: str, principal: dict = Depends(auth)):
+        full = _shared_path(cfg.shared_dir, path)
+        if not os.path.isfile(full):
+            raise HTTPException(status_code=404, detail="file not found")
+        size = os.path.getsize(full)
+        if size > MAX_FILE_BYTES:
+            raise HTTPException(status_code=413,
+                                detail=f"file size {size} exceeds limit {MAX_FILE_BYTES} bytes (1MB)")
+        with open(full, "rb") as f:
+            data = f.read()
+        audit.line(0, principal["name"], "file_download", path)
+        return Response(content=data, media_type="application/octet-stream",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="{os.path.basename(full)}"'})
+
+    # ---- 共享知识（skills / MCP / memory）：个人上传即团队可用，下次任务自动加载 ----
+
+    def _check_shared_name(name: str) -> str:
+        name = (name or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,49}", name):
+            raise HTTPException(status_code=400,
+                                detail="name: 1-50 chars, letters/digits/._-, start alphanumeric")
+        return name
+
+    def _shared_skill_dir(name: str) -> str:
+        base = os.path.realpath(os.path.join(cfg.shared_dir, "skills"))
+        full = os.path.realpath(os.path.join(base, name))
+        if full != base and not full.startswith(base + os.sep):
+            raise HTTPException(status_code=400, detail="path escapes skills dir")
+        return full
+
+    @app.get("/dashboard/shared")
+    async def dashboard_shared(request: Request):
+        _dash_auth(request)
+        skills, mcp, memory = [], [], []
+        sroot = os.path.realpath(os.path.join(cfg.shared_dir, "skills"))
+        if os.path.isdir(sroot):
+            for n in sorted(os.listdir(sroot)):
+                d = os.path.join(sroot, n)
+                if not os.path.isdir(d):
+                    continue
+                files: list[str] = []
+                for dirpath, dirnames, filenames in os.walk(d):
+                    dirnames[:] = [x for x in dirnames if x != "__pycache__"]
+                    for fn in filenames:
+                        files.append(os.path.relpath(os.path.join(dirpath, fn), d))
+                desc = ""
+                sp = os.path.join(d, "SKILL.md")
+                if os.path.isfile(sp):
+                    try:
+                        with open(sp, encoding="utf-8", errors="replace") as f:
+                            m = re.search(r"^description:\s*(.+)$", f.read(), re.M)
+                        if m:
+                            desc = m.group(1).strip()
+                    except OSError:
+                        pass
+                skills.append({"name": n, "files": sorted(files), "description": desc[:160]})
+        mroot = os.path.realpath(os.path.join(cfg.shared_dir, "mcp"))
+        if os.path.isdir(mroot):
+            for fn in sorted(os.listdir(mroot)):
+                if not fn.endswith(".json"):
+                    continue
+                name = fn[:-5]
+                try:
+                    with open(os.path.join(mroot, fn), encoding="utf-8") as f:
+                        obj = json.load(f)
+                except (OSError, ValueError):
+                    obj = None
+                entry = shared_knowledge.mcp_entry_from_file(name, obj) or obj or {}
+                summ = ""
+                if isinstance(entry, dict):
+                    if entry.get("command"):
+                        summ = " ".join(str(x) for x in entry["command"][:3])
+                    elif entry.get("url"):
+                        summ = str(entry["url"])
+                mcp.append({"name": name, "config": entry, "summary": summ})
+        memroot = os.path.realpath(os.path.join(cfg.shared_dir, "memory"))
+        if os.path.isdir(memroot):
+            for fn in sorted(os.listdir(memroot)):
+                p = os.path.join(memroot, fn)
+                if os.path.isfile(p):
+                    memory.append({
+                        "name": fn[:-3] if fn.endswith(".md") else fn,
+                        "size": os.path.getsize(p),
+                        "mtime": int(os.path.getmtime(p)),
+                    })
+        return {"skills": skills, "mcp": mcp, "memory": memory}
+
+    @app.post("/dashboard/shared/skills", status_code=201)
+    async def shared_skill_upload(request: Request, body: SharedSkillUpload):
+        _dash_auth(request)
+        name = _check_shared_name(body.name)
+        sdir = _shared_skill_dir(name)
+        rel = (body.file or "SKILL.md").strip()
+        norm = os.path.normpath(rel)
+        if (not rel or rel.startswith("/") or "\x00" in rel
+                or ".." in norm.split(os.sep)):
+            raise HTTPException(status_code=400, detail="bad file path (relative, no ..)")
+        full = os.path.realpath(os.path.join(sdir, norm))
+        if not full.startswith(sdir + os.sep):
+            raise HTTPException(status_code=400, detail="path escapes skill dir")
+        try:
+            data = base64.b64decode(body.content_b64, validate=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid base64 content")
+        if len(data) > MAX_FILE_BYTES:
+            raise HTTPException(status_code=413,
+                                detail=f"file size {len(data)} exceeds limit {MAX_FILE_BYTES} bytes (1MB)")
+        os.makedirs(os.path.dirname(full) or sdir, exist_ok=True)
+        with open(full, "wb") as f:
+            f.write(data)
+        audit.line(0, "__dashboard__", "shared_skill_upload", f"{name}/{norm} ({len(data)}B)")
+        return {"ok": True, "name": name, "file": norm, "size": len(data),
+                "note": "立即生效：下一个任务自动加载"}
+
+    @app.delete("/dashboard/shared/skills/{name}")
+    async def shared_skill_delete(name: str, request: Request):
+        _dash_auth(request)
+        name = _check_shared_name(name)
+        d = _shared_skill_dir(name)
+        if not os.path.isdir(d):
+            raise HTTPException(status_code=404, detail="skill not found")
+        shutil.rmtree(d, ignore_errors=True)
+        audit.line(0, "__dashboard__", "shared_skill_delete", name)
+        return {"ok": True, "name": name, "note": "立即生效：下一个任务起不再加载"}
+
+    @app.post("/dashboard/shared/mcp", status_code=201)
+    async def shared_mcp_upload(request: Request, body: SharedMcpUpload):
+        _dash_auth(request)
+        name = _check_shared_name(body.name)
+        if not isinstance(body.config, dict) or not body.config:
+            raise HTTPException(status_code=422, detail="config must be a non-empty JSON object")
+        root = os.path.join(cfg.shared_dir, "mcp")
+        os.makedirs(root, exist_ok=True)
+        with open(os.path.join(root, name + ".json"), "w", encoding="utf-8") as f:
+            json.dump(body.config, f, ensure_ascii=False, indent=2)
+        audit.line(0, "__dashboard__", "shared_mcp_upload", name)
+        return {"ok": True, "name": name, "note": "立即生效：下一个任务自动加载"}
+
+    @app.delete("/dashboard/shared/mcp/{name}")
+    async def shared_mcp_delete(name: str, request: Request):
+        _dash_auth(request)
+        name = _check_shared_name(name)
+        p = os.path.realpath(os.path.join(cfg.shared_dir, "mcp", name + ".json"))
+        if not os.path.isfile(p):
+            raise HTTPException(status_code=404, detail="mcp not found")
+        os.unlink(p)
+        audit.line(0, "__dashboard__", "shared_mcp_delete", name)
+        return {"ok": True, "name": name, "note": "立即生效：下一个任务起不再加载"}
+
+    @app.post("/dashboard/shared/memory", status_code=201)
+    async def shared_memory_upload(request: Request, body: SharedMemoryUpload):
+        _dash_auth(request)
+        name = _check_shared_name(body.name)
+        if len(body.content.encode("utf-8")) > MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="content exceeds 1MB")
+        root = os.path.join(cfg.shared_dir, "memory")
+        os.makedirs(root, exist_ok=True)
+        with open(os.path.join(root, name + ".md"), "w", encoding="utf-8") as f:
+            f.write(body.content)
+        audit.line(0, "__dashboard__", "shared_memory_upload", name)
+        return {"ok": True, "name": name,
+                "note": "立即生效：下一个任务起自动注入全员 agent 的 AGENTS.md"}
+
+    @app.delete("/dashboard/shared/memory/{name}")
+    async def shared_memory_delete(name: str, request: Request):
+        _dash_auth(request)
+        name = _check_shared_name(name)
+        p = os.path.realpath(os.path.join(cfg.shared_dir, "memory", name + ".md"))
+        if not os.path.isfile(p):
+            raise HTTPException(status_code=404, detail="memory not found")
+        os.unlink(p)
+        audit.line(0, "__dashboard__", "shared_memory_delete", name)
+        return {"ok": True, "name": name, "note": "立即生效：下一个任务起不再注入"}
+
+    @app.get("/dashboard/shared/content")
+    async def shared_content(request: Request, kind: str, name: str, file: str = ""):
+        _dash_auth(request)
+        name = _check_shared_name(name)
+        if kind == "memory":
+            p = os.path.realpath(os.path.join(cfg.shared_dir, "memory", name + ".md"))
+        elif kind == "mcp":
+            p = os.path.realpath(os.path.join(cfg.shared_dir, "mcp", name + ".json"))
+        elif kind == "skill":
+            sdir = _shared_skill_dir(name)
+            rel = os.path.normpath(file or "SKILL.md")
+            if not file or file.startswith("/") or ".." in rel.split(os.sep):
+                raise HTTPException(status_code=400, detail="bad file path")
+            p = os.path.realpath(os.path.join(sdir, rel))
+            if not p.startswith(sdir + os.sep):
+                raise HTTPException(status_code=400, detail="path escapes skill dir")
+        else:
+            raise HTTPException(status_code=400, detail="kind must be skill|mcp|memory")
+        if not os.path.isfile(p):
+            raise HTTPException(status_code=404, detail="not found")
+        with open(p, encoding="utf-8", errors="replace") as f:
+            return {"name": name, "kind": kind, "content": f.read()[:200000]}
+
+    # ---- 报表与监控 ----
+
+    @app.get("/admin/report")
+    async def admin_report(days: int = 7, _: None = Depends(require_admin)):
+        rep = db.report(days)
+        rep["audit_tail"] = audit.tail(10)
+        return rep
+
+    @app.post("/admin/update")
+    async def admin_update(_: None = Depends(require_admin)):
+        """人工指令即时更新：触发 bootloader（git 拉新→测试→切换→重启→健康检查→失败回滚）。"""
+        boot = cfg.boot_cmd
+        if not boot or not os.path.isfile(boot):
+            raise HTTPException(status_code=501,
+                                detail=f"bootloader not installed: {boot or '(unset)'}")
+        ok, how = _launch_boot(boot)
+        if not ok:
+            raise HTTPException(status_code=409, detail=how)
+        audit.line(0, "__admin__", "update_trigger", how)
+        return {"ok": True, "trigger": how, "version_now": _service_version(),
+                "note": "更新已后台触发；轮询 GET /health 的 version 字段确认到达新 git SHA"}
+
+    dash_sessions: dict[str, float] = {}
+
+    def _dash_ok(request: Request) -> bool:
+        if not cfg.dashboard_password:
+            return False
+        now = time.time()
+        for k in [k for k, exp in dash_sessions.items() if exp < now]:
+            dash_sessions.pop(k, None)
+        tok = request.cookies.get(DASH_COOKIE, "")
+        exp = dash_sessions.get(tok)
+        return bool(tok) and bool(exp and exp > now)
+
+    def _metrics_body() -> dict:
+        now = time.time()
+        today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+        return {
+            "uptime_seconds": round(time.monotonic() - started_at, 1),
+            "engine": cfg.engine,
+            "max_concurrent": cfg.max_concurrent,
+            "active": sched.active if sched else 0,
+            "queued": sched.pending if sched else 0,
+            "tasks": db.status_counts(),
+            "today": db.period_stats(today_start),
+            "last_7d": db.period_stats(now - 7 * 86400),
+            "recent_task_ids": db.recent_task_ids(60, 20),
+        }
+
+    @app.get("/metrics")
+    async def metrics():
+        return _metrics_body()
+
+    @app.get("/", response_class=HTMLResponse)
+    async def dashboard_page(request: Request):
+        if not cfg.dashboard_password:
+            raise HTTPException(status_code=404, detail="not found")
+        if _dash_ok(request):
+            return DASH_HTML
+        err = '<div class="err">口令错误，请重试</div>' if request.query_params.get("e") else ""
+        return LOGIN_HTML.replace("__ERR__", err)
+
+    @app.post("/login")
+    async def dashboard_login(password: str = Form(default="")):
+        if not cfg.dashboard_password:
+            raise HTTPException(status_code=404, detail="not found")
+        if not secrets.compare_digest(password, cfg.dashboard_password):
+            return RedirectResponse("/?e=1", status_code=303)
+        tok = secrets.token_urlsafe(24)
+        dash_sessions[tok] = time.time() + DASH_TTL
+        resp = RedirectResponse("/", status_code=302)
+        resp.set_cookie(DASH_COOKIE, tok, max_age=DASH_TTL, httponly=True,
+                        samesite="strict", path="/")
+        return resp
+
+    @app.get("/logout")
+    async def dashboard_logout():
+        resp = RedirectResponse("/", status_code=302)
+        resp.delete_cookie(DASH_COOKIE, path="/")
+        return resp
+
+    @app.get("/dashboard/data")
+    async def dashboard_data(request: Request):
+        if not cfg.dashboard_password:
+            raise HTTPException(status_code=404, detail="not found")
+        if not _dash_ok(request):
+            raise HTTPException(status_code=401, detail="login required")
+        tasks = db.list_tasks(limit=50)
+        for t in tasks:
+            t["description"] = (t.get("description") or "")[:120]
+            t.pop("result", None)
+            t.pop("workdir", None)
+        rep = db.report(7)
+        rep.pop("audit_tail", None)
+        return {"metrics": _metrics_body(), "tasks": tasks, "report": rep}
+
+    # ---- 凭证管理（dashboard 口令会话内，代理 admin 的 users 管理） ----
+
+    def _dash_auth(request: Request) -> None:
+        if not cfg.dashboard_password:
+            raise HTTPException(status_code=404, detail="not found")
+        if not _dash_ok(request):
+            raise HTTPException(status_code=401, detail="login required")
+
+    def _token_mask(tok: str) -> str:
+        return tok
+
+    @app.get("/dashboard/tokens")
+    async def dashboard_tokens(request: Request):
+        _dash_auth(request)
+        stats = {u["user"]: u for u in db.report(7)["by_user"]}
+        users = []
+        for u in db.list_users():
+            s = stats.get(u["name"], {})
+            users.append({
+                "name": u["name"],
+                "token": _token_mask(u["token"]),
+                "created_at": u["created_at"],
+                "tasks_7d": s.get("tasks", 0),
+                "done_7d": s.get("done", 0),
+            })
+        return {"users": users}
+
+    @app.post("/dashboard/tokens", status_code=201)
+    async def dashboard_token_create(request: Request, body: DashTokenBody):
+        _dash_auth(request)
+        name = body.name.strip()
+        if not name or len(name) > 50:
+            raise HTTPException(status_code=422, detail="name required (1-50 chars)")
+        if db.user_by_name(name):
+            raise HTTPException(status_code=409, detail="user exists")
+        token = "ta_" + secrets.token_urlsafe(24)
+        db.create_user(name, token)
+        audit.line(0, "__dashboard__", "token_create", name)
+        return {"name": name, "token": token,
+                "note": "token 仅本次显示，请立即发给本人保存"}
+
+    @app.post("/dashboard/tokens/{name}/regenerate")
+    async def dashboard_token_regenerate(name: str, request: Request):
+        _dash_auth(request)
+        if not db.user_by_name(name):
+            raise HTTPException(status_code=404, detail="user not found")
+        token = "ta_" + secrets.token_urlsafe(24)
+        db.delete_user(name)
+        db.create_user(name, token)
+        audit.line(0, "__dashboard__", "token_regenerate", name)
+        return {"name": name, "token": token,
+                "note": "旧 token 立即失效；新 token 仅本次显示"}
+
+    @app.delete("/dashboard/tokens/{name}")
+    async def dashboard_token_delete(name: str, request: Request):
+        _dash_auth(request)
+        if not db.user_by_name(name):
+            raise HTTPException(status_code=404, detail="user not found")
+        db.delete_user(name)
+        audit.line(0, "__dashboard__", "token_delete", name)
+        return {"ok": True, "name": name}
+
+    return app

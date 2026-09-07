@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.bak*
+VERSION
+relay.env
+relay-service/skills/
+.venv/
+基于ClaudeCode的经营智能体蜂群设计方案.md

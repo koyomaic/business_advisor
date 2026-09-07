@@ -25,7 +25,15 @@ relay-service/
 ├── relay.env            # 服务环境变量（含 admin token，600 权限）
 ```
 
-## 配置（relay.env）
+## 配置（两层：relay.defaults.env + relay.env）
+
+systemd 按序加载，**后者覆盖前者**：
+
+1. **`relay.defaults.env`**（进 git，随版本发布）：全机队统一的非涉密默认值——
+   并发、超时、引擎、模型、路径、拦截策略等。改一次 push，全机队生效，无需逐台配置。
+2. **`relay.env`**（每台机器各自维护，永不进 git，600 权限）：只放密钥
+   （`RELAY_ADMIN_TOKEN`、`RELAY_DASHBOARD_PASSWORD`）与个别本机覆盖项。
+   模板见 `relay.env.example`。
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |

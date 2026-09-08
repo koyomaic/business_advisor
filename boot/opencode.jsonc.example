@@ -1,0 +1,38 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "chambroad": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Chambroad",
+      "options": {
+        "baseURL": "http://model.chambroad.com:30131/v1",
+        "apiKey": "sk-REPLACE_ME"
+      },
+      "models": {
+        "Qwen3.8-27B-FP8-LCBD": {
+          "name": "Qwen3.8-27B-FP8-LCBD"
+        }
+      }
+    },
+    "aigateway": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Chambroad AI Gateway",
+      "options": {
+        "baseURL": "https://aigateway.chambroad.com/v1",
+        "apiKey": "sk-REPLACE_ME"
+      },
+      "models": {
+        "qwen3.8-flash": {
+          "name": "qwen3.8-flash"
+        },
+        "qwen3.8-max": {
+          "name": "qwen3.8-max"
+        }
+      }
+    }
+  },
+  "model": "chambroad/Qwen3.8-27B-FP8-LCBD",
+  "skills": {
+    "paths": ["/opt/team/skills"]
+  }
+}

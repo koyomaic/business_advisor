@@ -107,6 +107,21 @@ self_update_bootloader() { # $1=sha；从 release 的 boot/（仓库真源）同
   fi
 }
 
+run_provision() { # $1=sha；部署/守护轮次后执行安装检测清单（幂等自愈：检测→缺失→安装→验证）；老 release 无 provision.sh 则跳过
+  local sha="$1" p rc=0
+  [ -n "$sha" ] || return 0
+  p="$RELEASE_ROOT/$sha/boot/provision.sh"
+  [ -f "$p" ] || return 0
+  log "执行安装检测清单（provision.sh install）"
+  bash "$p" install >>"$LOG" 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "安装检测清单 PASS"
+  else
+    log "安装检测清单 FAIL（rc=$rc），详见 $LOG"
+  fi
+  return "$rc"
+}
+
 deploy() { # $1=sha
   local sha="$1" rel="$RELEASE_ROOT/$1" prev got tmp
   if [ -d "$rel" ]; then
@@ -167,11 +182,12 @@ prune() { # 保留现役 + 最近 KEEP-1 份
 }
 
 cmd_boot() {
-  local sha
+  local sha prc=0
   sha="$(remote_sha || true)"
   if [ -n "$sha" ] && [ "$sha" != "$(current_sha)" ]; then
     migrate_if_needed
     deploy "$sha" || { notify_failure "更新部署失败：${DEPLOY_FAIL_REASON:-未知原因，详见日志}"; exit 1; }
+    run_provision "$sha" || prc=$?
   else
     [ -n "$sha" ] || notify_failure "更新检查失败：远端不可达或空仓库（github 网络异常？），本轮未检查更新"
     self_update_bootloader "${sha:-$(current_sha)}" # release 已存在（无更新轮次）也自愈 bootloader
@@ -186,6 +202,11 @@ cmd_boot() {
       systemctl restart "$UNIT"
       wait_healthy "" && log "重启后恢复" || log "重启后仍不健康！需人工介入"
     fi
+    run_provision "${sha:-$(current_sha)}" || prc=$?
+  fi
+  if [ "$prc" -ne 0 ]; then
+    notify_failure "安装检测清单（provision）未通过 rc=$prc，详见 $LOG"
+    exit 1
   fi
 }
 

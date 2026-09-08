@@ -1,0 +1,94 @@
+# relay 机队安装清单（provision.sh）
+
+> 可执行的顺序清单：**检测 → PASS → 继续；检测 → 缺失 → 安装 → 验证 → PASS → 继续**。
+> 新服务器安装、每日 git 更新守护轮次，跑的都是同一份清单（本目录 `provision.sh`）。
+
+## 组件全景
+
+| 组件 | 单元 | 说明 |
+|---|---|---|
+| 中转服务 | `relay.service` | uvicorn :8787，代码在 `CURRENT_LINK`（release 软链） |
+| git 同步部署 | `relay-boot.timer` → `boot.sh` | 每日 01:00 + 开机 2min：拉新→测试门禁→上线/回滚→**跑 provision 清单**→失败钉钉预警 |
+| 工作区备份 | `relay-backup.timer` → `scripts/backup.sh` | 每日 03:30：relay.db 快照 + shared/ + relay.env + relay.log → `/mnt/vol-eltaah12/backup/` |
+| Claude 代理 | `claude-proxy.service` | 可选：Anthropic→OpenAI 翻译代理 :8790 |
+| TLS 代理 | `relay-tls-proxy.service` | 可选：仅 HTTPS 主机（有 relay-tls 证书才装），socat :8788→:8787 |
+
+## 新服务器一键安装
+
+前置：root、systemd、能出网到 github.com 与模型网关。其余全部由清单自动安装。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/koyomaic/business_advisor/main/boot/provision.sh \
+  -o /tmp/provision.sh && bash /tmp/provision.sh install
+```
+
+**旧机迁移（推荐先做）**：把旧机 `/mnt/vol-eltaah12/backup/relay-backup-*.tar.gz` 最新一份
+放到新机同路径，再跑上面命令 —— 清单会自动用备份补齐 workspace 缺失文件
+（relay.db 成员 token、relay.env 密钥、shared/ 技能与 dws 种子；`--keep-old-files` 绝不覆盖已有）。
+
+安装后必须人工补的（清单会 WARN 提示，密钥不进 git）：
+
+1. `/root/.config/opencode/opencode.jsonc` — 填两处 `apiKey`（占位符 `sk-REPLACE_ME`），然后 `systemctl restart relay`
+2. 无备份包时：`relay.env` 是新生成的随机密钥，成员 token 需重新发放；`relay.db` 为空库
+3. 可选：`/root/.claude-proxy/config.json` 填 baseURL/apiKey/model
+4. 可选：workspace `opencode.json`（内网 MCP 地址）从旧机拷贝
+5. 可选：本机私有检查写 `/opt/team/relay-boot/provision-local.sh`（可执行，参数=模式；
+   适合放内网 PG/MCP 连通性等不进 git 的检查，失败只 WARN）
+
+## 清单项目（32 项，顺序执行）
+
+| # | 项目 | 缺失时动作 | 级别 |
+|---|---|---|---|
+| 01 | root+systemd | 中止 | 硬 |
+| 02 | 目录布局（/mnt/vol-eltaah12/*、/opt/team/*） | mkdir -p | 硬 |
+| 03-05 | git / curl·tar·openssl / sqlite3 | apt/dnf 安装 | 硬 |
+| 06-07 | python3≥3.10+venv / node≥20+npm | apt/dnf（node 走 NodeSource 22.x） | 硬 |
+| 08-09 | opencode-ai@1.18.29 / dingtalk-workspace-cli@1.0.61 | npm -g 安装（版本钉死） | 硬 |
+| 10 | 资源树（release/现役树，否则临时 clone） | git clone | 硬 |
+| 11 | venv+依赖（fastapi/uvicorn/httpx/pytest 可导入） | venv + pip -r requirements.txt（阿里云镜像） | 硬 |
+| 12-13 | boot.env / boot.sh | 生成标准布局 / 从资源树同步(700) | 硬 |
+| 14-18 | relay.service、relay-backup.service/timer、relay-boot.service/timer | 模板渲染同步；relay.service 变更后重启+健康检查，不健康自动回退旧单元 | 硬 |
+| 19 | relay.env | 备份恢复 → 随机生成 | 软(WARN) |
+| 20 | relay.db | 备份恢复 → 提示首启自建 | 软 |
+| 21 | dws 登录态种子 | 提示拷贝/登录 | 软 |
+| 22 | opencode.jsonc | 落模板 → 提示填 apiKey | 软 |
+| 23-24 | workspace AGENTS.md / opencode.json | 仓库模板安装 / 提示拷贝 | 软 |
+| 25-26 | claude-proxy / relay-tls-proxy | 缺则装（tls 仅证书存在时） | 软 |
+| 27 | 首装引导（无现役 release → boot.sh boot 完整部署） | 自动 | 硬 |
+| 28 | relay active+healthy | enable/start/restart | 硬 |
+| 29 | 两个 timer enabled | enable --now | 硬 |
+| 30 | GitHub 远端可达且 remote==current | 仅报告 | 软 |
+| 31 | dws 种子登录态实测（contact user me） | 仅报告 | 软 |
+| 32 | provision-local.sh 本机附加检查 | 执行 hook | 软 |
+
+硬项失败：install 模式立即中止（后续项依赖它），退出码 1；软项失败只 WARN，退出码不受影响。
+
+## 两种模式
+
+```bash
+provision.sh install   # 默认。幂等自愈，可反复跑；新装 + 每日守护轮次用
+provision.sh check     # 只读体检，不做任何改动；缺失硬项=FAIL、配置漂移=WARN
+```
+
+## 每日自动执行（已集成 boot.sh）
+
+`boot.sh boot/update`（timer 每日 01:00 + 开机 2min）在部署/守护完成后自动执行
+`provision.sh install`：健康机上全部 PASS（约 10-20 秒纯检测）；发现缺失自动补装；
+清单 FAIL → 钉钉直聊预警 `ALERT_TO`（boot.env 配置，默认王洪彬）。
+
+## 验收（新装完成后）
+
+```bash
+curl -s 127.0.0.1:8787/health          # ok:true, version=远端 sha
+/opt/team/relay-boot/boot.sh status    # remote=current=health 三者一致, unit active
+/opt/team/relay-boot/boot.sh update    # 守护 OK + 安装检测清单 PASS
+systemctl list-timers relay-boot.timer relay-backup.timer --no-pager
+systemctl start relay-backup           # /mnt/vol-eltaah12/backup/ 出新包
+bash /opt/team/relay-deploy/current/boot/provision.sh check   # 全 PASS
+```
+
+## 切流与旧机收尾
+
+1. 成员改指向新机 `IP:8787`（HTTPS 主机另有 :8788）
+2. 旧机 `systemctl disable --now relay relay-boot.timer relay-backup.timer claude-proxy`，数据保留 ≥1 周
+3. 旧机 bootloader 备份目录（`/opt/team/relay-boot.bak-*`）含历史 PAT，迁移后销毁

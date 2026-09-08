@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily relay backup at 03:30 (catches up missed runs)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+Unit=relay-backup.service
+
+[Install]
+WantedBy=timers.target

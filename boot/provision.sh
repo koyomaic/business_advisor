@@ -381,12 +381,17 @@ else bad "未运行或不健康"; fi
 # ---------- 27 定时任务 ----------
 step "定时任务(timer)"
 if heal; then
-  systemctl is-enabled --quiet relay-boot.timer 2>/dev/null || systemctl enable --now relay-boot.timer >/dev/null 2>&1
-  systemctl is-enabled --quiet relay-backup.timer 2>/dev/null || systemctl enable --now relay-backup.timer >/dev/null 2>&1
+  for t in relay-boot.timer relay-backup.timer; do
+    systemctl is-enabled --quiet "$t" 2>/dev/null || systemctl enable "$t" >/dev/null 2>&1
+    # failed 态（如触发目标单元曾被移除）不会再触发，必须 restart 拉起
+    systemctl is-active --quiet "$t" || systemctl restart "$t" >/dev/null 2>&1
+  done
 fi
-if systemctl is-enabled --quiet relay-boot.timer 2>/dev/null && systemctl is-enabled --quiet relay-backup.timer 2>/dev/null; then ok "boot(01:00)+backup(03:30) enabled"
-elif heal; then abort "timer 无法 enable"
-else bad "timer 未启用"; fi
+if systemctl is-enabled --quiet relay-boot.timer 2>/dev/null && systemctl is-active --quiet relay-boot.timer \
+   && systemctl is-enabled --quiet relay-backup.timer 2>/dev/null && systemctl is-active --quiet relay-backup.timer; then
+  ok "boot(01:00)+backup(03:30) enabled+active"
+elif heal; then abort "timer 无法启用/激活"
+else bad "timer 未启用或 failed（install 模式自动拉起）"; fi
 
 # ---------- 28 GitHub 远端（SOFT） ----------
 step "GitHub远端"

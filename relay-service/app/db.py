@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS users(
 );
 CREATE TABLE IF NOT EXISTS tasks(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user TEXT NOT NULL,
+  "user" TEXT NOT NULL,
   description TEXT NOT NULL,
   project TEXT NOT NULL DEFAULT '',
   targets TEXT NOT NULL DEFAULT '[]',
@@ -37,6 +37,40 @@ CREATE TABLE IF NOT EXISTS tasks(
 );
 """
 
+# PostgreSQL 方言（RELAY_DB 为 postgresql:// URL 时使用）；"user" 是 PG 保留字必须加引号
+PG_SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS users(
+      token TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      created_at DOUBLE PRECISION NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS tasks(
+      id BIGSERIAL PRIMARY KEY,
+      "user" TEXT NOT NULL,
+      description TEXT NOT NULL,
+      project TEXT NOT NULL DEFAULT '',
+      targets TEXT NOT NULL DEFAULT '[]',
+      priority TEXT NOT NULL DEFAULT 'normal',
+      status TEXT NOT NULL DEFAULT 'queued',
+      session_id TEXT NOT NULL DEFAULT '',
+      workdir TEXT NOT NULL DEFAULT '',
+      result TEXT NOT NULL DEFAULT '',
+      error TEXT NOT NULL DEFAULT '',
+      changed_files TEXT NOT NULL DEFAULT '[]',
+      conflicts TEXT NOT NULL DEFAULT '[]',
+      tokens BIGINT NOT NULL DEFAULT 0,
+      cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+      resume_from BIGINT,
+      blocked_cmd TEXT NOT NULL DEFAULT '',
+      resume_hint TEXT NOT NULL DEFAULT '',
+      created_at DOUBLE PRECISION NOT NULL,
+      started_at DOUBLE PRECISION,
+      finished_at DOUBLE PRECISION
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at)",
+]
+
 TASK_FIELDS = {
     "user", "description", "project", "targets", "priority", "status",
     "session_id", "workdir", "result", "error", "changed_files",
@@ -45,7 +79,11 @@ TASK_FIELDS = {
 }
 
 
-def _row_to_task(row: sqlite3.Row) -> dict:
+def is_pg_url(target: str) -> bool:
+    return target.startswith(("postgresql://", "postgres://"))
+
+
+def _row_to_task(row) -> dict:
     t = dict(row)
     for k in ("targets", "changed_files", "conflicts"):
         try:
@@ -56,29 +94,100 @@ def _row_to_task(row: sqlite3.Row) -> dict:
 
 
 class DB:
+    """存储后端。构造参数既可是 SQLite 文件路径，也可是 postgresql:// URL（自动识别）。
+
+    PG 后端：psycopg2 + RealDictCursor，单连接 + 线程锁（与 SQLite 后端同并发模型），
+    断线（OperationalError/InterfaceError）自动重连并重试一次。
+    """
+
     def __init__(self, path: str):
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._pg = is_pg_url(path)
+        self._conn = None
+        if self._pg:
+            import psycopg2
+            import psycopg2.extras
+            self._psycopg2 = psycopg2
+            self._pg_extras = psycopg2.extras
+            self._pg_url = path
+            self._conn = self._pg_connect()
+            self._pg_init_schema()
+        else:
+            self._conn = sqlite3.connect(path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            with self._lock:
+                self._conn.executescript(SCHEMA)
+                cols = {r[1] for r in self._conn.execute("PRAGMA table_info(tasks)")}
+                for name, decl in (("blocked_cmd", "TEXT NOT NULL DEFAULT ''"),
+                                   ("resume_hint", "TEXT NOT NULL DEFAULT ''")):
+                    if name not in cols:
+                        self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
+                self._conn.commit()
+
+    # ---- 后端内部 ----
+
+    def _pg_connect(self):
+        return self._psycopg2.connect(self._pg_url, connect_timeout=10,
+                                      cursor_factory=self._pg_extras.RealDictCursor)
+
+    def _pg_init_schema(self) -> None:
+        for ddl in PG_SCHEMA:
+            self._run(ddl)
+        rows, _ = self._run("SELECT column_name FROM information_schema.columns"
+                            " WHERE table_schema='public' AND table_name='tasks'")
+        cols = {r["column_name"] for r in rows}
+        for name, decl in (("blocked_cmd", "TEXT NOT NULL DEFAULT ''"),
+                           ("resume_hint", "TEXT NOT NULL DEFAULT ''")):
+            if name not in cols:
+                self._run(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
+
+    def _pg_retriable(self, exc: Exception) -> bool:
+        return isinstance(exc, (self._psycopg2.OperationalError,
+                                self._psycopg2.InterfaceError))
+
+    def _pg_reset(self) -> None:  # 调用方须持锁
+        try:
+            if self._conn is not None and not self._conn.closed:
+                self._conn.close()
+        except Exception:
+            pass
+        self._conn = None
+
+    def _run(self, sql: str, args: tuple = ()):
+        """执行 SQL，返回 (rows, rowcount)。PG 后端 ? 占位符自动转 %s，断线重连重试一次。"""
+        if self._pg:
+            sql = sql.replace("?", "%s")
+            fetch = sql.lstrip().upper().startswith("SELECT") or "RETURNING" in sql.upper()
+        else:
+            fetch = True
         with self._lock:
-            self._conn.executescript(SCHEMA)
-            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(tasks)")}
-            for name, decl in (("blocked_cmd", "TEXT NOT NULL DEFAULT ''"),
-                               ("resume_hint", "TEXT NOT NULL DEFAULT ''")):
-                if name not in cols:
-                    self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
-            self._conn.commit()
+            for attempt in (1, 2):
+                try:
+                    if self._pg:
+                        if self._conn is None or self._conn.closed:
+                            self._conn = self._pg_connect()
+                        cur = self._conn.cursor()
+                        cur.execute(sql, args)
+                    else:
+                        cur = self._conn.execute(sql, args)
+                    rows = cur.fetchall() if fetch else []
+                    self._conn.commit()
+                    return rows, cur.rowcount
+                except Exception as e:
+                    if not (self._pg and attempt == 1 and self._pg_retriable(e)):
+                        raise
+                    self._pg_reset()
+        raise RuntimeError("unreachable")
 
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     def _q(self, sql: str, args: tuple = (), one: bool = False):
-        with self._lock:
-            cur = self._conn.execute(sql, args)
-            rows = cur.fetchall()
-            self._conn.commit()
-            return (rows[0] if rows else None) if one else rows
+        rows, _ = self._run(sql, args)
+        return (rows[0] if rows else None) if one else rows
 
     # ---- users ----
 
@@ -105,14 +214,18 @@ class DB:
     def create_task(self, *, user: str, description: str, project: str = "",
                     targets: list[str] | None = None, priority: str = "normal",
                     resume_from: int | None = None) -> int:
-        row = self._q(
-            "INSERT INTO tasks(user, description, project, targets, priority, resume_from, created_at)"
-            " VALUES(?, ?, ?, ?, ?, ?, ?)",
-            (user, description, project, json.dumps(targets or [], ensure_ascii=False),
-             priority, resume_from, time.time()),
-        )
-        cur = self._conn.execute("SELECT last_insert_rowid() AS id")
-        return cur.fetchone()["id"]
+        args = (user, description, project, json.dumps(targets or [], ensure_ascii=False),
+                priority, resume_from, time.time())
+        if self._pg:
+            row = self._q(
+                'INSERT INTO tasks("user", description, project, targets, priority, resume_from, created_at)'
+                " VALUES(?, ?, ?, ?, ?, ?, ?) RETURNING id", args, one=True)
+            return row["id"]
+        self._q(
+            'INSERT INTO tasks("user", description, project, targets, priority, resume_from, created_at)'
+            " VALUES(?, ?, ?, ?, ?, ?, ?)", args)
+        rows, _ = self._run("SELECT last_insert_rowid() AS id")
+        return rows[0]["id"]
 
     def task(self, task_id: int) -> dict | None:
         row = self._q("SELECT * FROM tasks WHERE id = ?", (task_id,), one=True)
@@ -129,7 +242,7 @@ class DB:
         if "conflicts" in fields and isinstance(fields["conflicts"], list):
             fields["conflicts"] = json.dumps(fields["conflicts"], ensure_ascii=False)
         sql = "UPDATE tasks SET {} WHERE id = ?".format(
-            ", ".join(f"{k} = ?" for k in fields))
+            ", ".join(f'"{k}" = ?' for k in fields))
         self._q(sql, (*fields.values(), task_id))
 
     def list_tasks(self, limit: int = 50, status: str | None = None) -> list[dict]:
@@ -180,17 +293,15 @@ class DB:
     def mark_stale_done(self, task_id: int, marker: str) -> bool:
         """原子地把仍处于 review/pending_approval 的任务置为 done。返回是否更新。"""
         now = time.time()
-        with self._lock:
-            cur = self._conn.execute(
-                "UPDATE tasks SET status='done', error=?, finished_at=COALESCE(finished_at, ?)"
-                " WHERE id=? AND status IN ('review','pending_approval')",
-                (marker, now, task_id))
-            self._conn.commit()
-            return cur.rowcount > 0
+        _, rowcount = self._run(
+            "UPDATE tasks SET status='done', error=?, finished_at=COALESCE(finished_at, ?)"
+            " WHERE id=? AND status IN ('review','pending_approval')",
+            (marker, now, task_id))
+        return rowcount > 0
 
     def report(self, days: int = 7) -> dict:
         rows = [dict(r) for r in self._q(
-            "SELECT user, status, tokens, created_at, blocked_cmd FROM tasks WHERE created_at >= ?",
+            'SELECT "user", status, tokens, created_at, blocked_cmd FROM tasks WHERE created_at >= ?',
             (time.time() - days * 86400,))]
         by_day: dict[str, dict[str, int]] = {}
         by_user: dict[str, dict] = {}

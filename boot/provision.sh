@@ -19,7 +19,7 @@
 #   - 密钥不进 git：relay.env 首装随机生成；opencode.jsonc 落模板后需人工填 apiKey
 #   - 旧机迁移：把旧机 /mnt/vol-eltaah12/backup/relay-backup-*.tar.gz 放到新机同路径，
 #     install 模式会自动用最新一份补齐 workspace 缺失文件（--keep-old-files，不覆盖已有）
-#   - 本机私有附加检查（内网 PG/MCP 连通等）写 /opt/team/relay-boot/provision-local.sh（可选，不进 git）
+#   - 本机私有附加检查（内网 MCP 连通等）写 /opt/team/relay-boot/provision-local.sh（可选，不进 git）
 set -uo pipefail
 
 MODE="${1:-install}"
@@ -181,7 +181,7 @@ else bad "无 release/现役树，check 模式不 clone"; fi
 
 # ---------- 11 venv + 依赖 ----------
 step "venv+依赖"
-chk_venv() { [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -c 'import fastapi,uvicorn,httpx,pytest' 2>/dev/null; }
+chk_venv() { [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -c 'import fastapi,uvicorn,httpx,pytest,psycopg2' 2>/dev/null; }
 if chk_venv; then ok "$VENV"
 elif heal; then
   miss "venv 或依赖"
@@ -265,14 +265,39 @@ EOF
   else warn "缺失（install 模式可从备份恢复或随机生成）"; fi
 fi
 
-# ---------- 18 relay.db（SOFT） ----------
-step "relay.db"
-if [ -f "$WORKSPACE/relay.db" ]; then ok
+# ---------- 18 数据库（relay.env RELAY_DB=postgresql:// 时为 PG 模式，否则 SQLite） ----------
+RELAY_DB_VAL="$(sed -n 's/^RELAY_DB=//p' "$WORKSPACE/relay.env" 2>/dev/null | tail -1 || true)"
+PG_MODE=0
+case "$RELAY_DB_VAL" in postgres*://*) PG_MODE=1 ;; esac
+step "数据库"
+if [ "$PG_MODE" = 1 ]; then
+  PG_MASKED="$(printf '%s' "$RELAY_DB_VAL" | sed -E 's#://[^@]*@#://***@#')"
+  if [ -x "$VENV/bin/python" ] && "$VENV/bin/python" - "$RELAY_DB_VAL" <<'PYEOF'
+import sys, psycopg2
+conn = psycopg2.connect(sys.argv[1], connect_timeout=5)
+cur = conn.cursor(); cur.execute("SELECT 1"); cur.fetchone(); conn.close()
+PYEOF
+  then ok "PG 连通 $PG_MASKED"
+  else bad "PG 不可达（$PG_MASKED）：relay 无法工作，检查内网/服务端"; fi
 else
-  PKG=""
-  heal && PKG="$(restore_from_backup || true)"
-  if [ -f "$WORKSPACE/relay.db" ]; then ok "从备份恢复 ${PKG##*/}"
-  else warn "缺失：relay 首启会自建新库，成员 token 需从旧机迁移或重新发放"; fi
+  if [ -f "$WORKSPACE/relay.db" ]; then ok "SQLite"
+  else
+    PKG=""
+    heal && PKG="$(restore_from_backup || true)"
+    if [ -f "$WORKSPACE/relay.db" ]; then ok "SQLite 从备份恢复 ${PKG##*/}"
+    else warn "缺失：relay 首启会自建新库，成员 token 需从旧机迁移或重新发放"; fi
+  fi
+fi
+
+# ---------- 18b pg_dump 客户端（仅 PG 模式：备份一致性快照必需） ----------
+if [ "$PG_MODE" = 1 ]; then
+  step "pg_dump客户端"
+  if command -v pg_dump >/dev/null 2>&1; then ok
+  elif heal; then
+    miss "postgresql-client"
+    if pkg_install postgresql-client && command -v pg_dump >/dev/null 2>&1; then ok "已安装"
+    else bad "安装失败（PG 模式备份不可用，需人工处理）"; fi
+  else bad "缺失（PG 模式备份必需，install 模式自动安装）"; fi
 fi
 
 # ---------- 19 dws 种子（SOFT） ----------
@@ -388,6 +413,6 @@ if [ -f "$LOCAL_HOOK" ]; then
   chmod +x "$LOCAL_HOOK" 2>/dev/null
   if "$LOCAL_HOOK" "$MODE"; then ok "hook 通过"
   else warn "hook 报错（详见其输出）"; fi
-else ok "无 hook（内网 PG/MCP 等本机检查可写 $LOCAL_HOOK）"; fi
+else ok "无 hook（内网 MCP 等本机检查可写 $LOCAL_HOOK）"; fi
 
 summary_exit

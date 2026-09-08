@@ -18,22 +18,38 @@ fail() {
 }
 
 [[ -d "$WORKSPACE" ]] || fail "workspace not found: $WORKSPACE"
-[[ -f "$WORKSPACE/relay.db" ]] || fail "relay.db not found in $WORKSPACE"
+
+# DB 模式：relay.env 的 RELAY_DB 为 postgresql:// URL 时走 pg_dump，否则/缺省走 SQLite 快照
+RELAY_DB="$(sed -n 's/^RELAY_DB=//p' "$WORKSPACE/relay.env" 2>/dev/null | tail -1 || true)"
 
 mkdir -p "$BACKUP_DIR"
 
-# relay.db: consistent snapshot via sqlite3 .backup when available, else cp (with warning)
 WARNING=""
-if command -v sqlite3 >/dev/null 2>&1; then
-  sqlite3 "$WORKSPACE/relay.db" ".backup $STAGE/relay.db"
+DB_ARGS=()
+if [[ "$RELAY_DB" == postgres*://* ]]; then
+  command -v pg_dump >/dev/null 2>&1 || fail "pg_dump not found (install postgresql-client)"
+  pg_dump --dbname="$RELAY_DB" -Fc -f "$STAGE/relay.pg.dump" || fail "pg_dump failed"
+  pg_restore --list "$STAGE/relay.pg.dump" >/dev/null 2>&1 || fail "pg_dump archive verification failed"
+  DB_ARGS+=(-C "$STAGE" relay.pg.dump)
+  # 历史 SQLite 库若仍在，一并归档（切换 PG 前的旧数据）
+  if [[ -f "$WORKSPACE/relay.db" ]]; then
+    DB_ARGS+=(-C "$WORKSPACE" relay.db)
+  fi
 else
-  WARNING="sqlite3 CLI not found; relay.db copied with cp (snapshot may not be consistent)"
-  cp "$WORKSPACE/relay.db" "$STAGE/relay.db"
-  printf '%s\n' "WARNING: $WARNING" >&2
+  [[ -f "$WORKSPACE/relay.db" ]] || fail "relay.db not found in $WORKSPACE"
+  # relay.db: consistent snapshot via sqlite3 .backup when available, else cp (with warning)
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$WORKSPACE/relay.db" ".backup $STAGE/relay.db"
+  else
+    WARNING="sqlite3 CLI not found; relay.db copied with cp (snapshot may not be consistent)"
+    cp "$WORKSPACE/relay.db" "$STAGE/relay.db"
+    printf '%s\n' "WARNING: $WARNING" >&2
+  fi
+  DB_ARGS+=(-C "$STAGE" relay.db)
 fi
 
-# package: shared/ + relay.log + relay.env from workspace, relay.db snapshot from staging
-tar -czf "$DEST" -C "$WORKSPACE" shared relay.log relay.env -C "$STAGE" relay.db
+# package: shared/ + relay.log + relay.env from workspace, DB snapshot from staging
+tar -czf "$DEST" -C "$WORKSPACE" shared relay.log relay.env "${DB_ARGS[@]}"
 chmod 600 "$DEST"
 
 # verify archive is readable

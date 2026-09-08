@@ -9,7 +9,7 @@
 |---|---|---|
 | 中转服务 | `relay.service` | uvicorn :8787，代码在 `CURRENT_LINK`（release 软链） |
 | git 同步部署 | `relay-boot.timer` → `boot.sh` | 每日 01:00 + 开机 2min：拉新→测试门禁→上线/回滚→**跑 provision 清单**→失败钉钉预警 |
-| 工作区备份 | `relay-backup.timer` → `scripts/backup.sh` | 每日 03:30：relay.db 快照 + shared/ + relay.env + relay.log → `/mnt/vol-eltaah12/backup/` |
+| 工作区备份 | `relay-backup.timer` → `scripts/backup.sh` | 每日 03:30：数据库快照（SQLite `.backup` 或 PG `pg_dump -Fc`）+ shared/ + relay.env + relay.log → `/mnt/vol-eltaah12/backup/` |
 | Claude 代理 | `claude-proxy.service` | 可选：Anthropic→OpenAI 翻译代理 :8790 |
 | TLS 代理 | `relay-tls-proxy.service` | 可选：仅 HTTPS 主机（有 relay-tls 证书才装），socat :8788→:8787 |
 
@@ -33,9 +33,9 @@ curl -fsSL https://raw.githubusercontent.com/koyomaic/business_advisor/main/boot
 3. 可选：`/root/.claude-proxy/config.json` 填 baseURL/apiKey/model
 4. 可选：workspace `opencode.json`（内网 MCP 地址）从旧机拷贝
 5. 可选：本机私有检查写 `/opt/team/relay-boot/provision-local.sh`（可执行，参数=模式；
-   适合放内网 PG/MCP 连通性等不进 git 的检查，失败只 WARN）
+   适合放内网 MCP 连通性等不进 git 的检查，失败只 WARN；PG 连通性已是原生清单项）
 
-## 清单项目（32 项，顺序执行）
+## 清单项目（32 项，PG 模式 33 项，顺序执行）
 
 | # | 项目 | 缺失时动作 | 级别 |
 |---|---|---|---|
@@ -45,11 +45,12 @@ curl -fsSL https://raw.githubusercontent.com/koyomaic/business_advisor/main/boot
 | 06-07 | python3≥3.10+venv / node≥20+npm | apt/dnf（node 走 NodeSource 22.x） | 硬 |
 | 08-09 | opencode-ai@1.18.29 / dingtalk-workspace-cli@1.0.61 | npm -g 安装（版本钉死） | 硬 |
 | 10 | 资源树（release/现役树，否则临时 clone） | git clone | 硬 |
-| 11 | venv+依赖（fastapi/uvicorn/httpx/pytest 可导入） | venv + pip -r requirements.txt（阿里云镜像） | 硬 |
+| 11 | venv+依赖（fastapi/uvicorn/httpx/pytest/psycopg2 可导入） | venv + pip -r requirements.txt（阿里云镜像） | 硬 |
 | 12-13 | boot.env / boot.sh | 生成标准布局 / 从资源树同步(700) | 硬 |
 | 14-18 | relay.service、relay-backup.service/timer、relay-boot.service/timer | 模板渲染同步；relay.service 变更后重启+健康检查，不健康自动回退旧单元 | 硬 |
 | 19 | relay.env | 备份恢复 → 随机生成 | 软(WARN) |
-| 20 | relay.db | 备份恢复 → 提示首启自建 | 软 |
+| 20 | 数据库：SQLite relay.db 或 PG 连通实测（按 relay.env RELAY_DB 判定） | SQLite：备份恢复→提示首启自建；PG：不可达=FAIL 预警 | SQLite 软 / PG 硬 |
+| 20b | pg_dump 客户端（仅 PG 模式，备份必需） | apt/dnf 装 postgresql-client | 硬（FAIL 预警） |
 | 21 | dws 登录态种子 | 提示拷贝/登录 | 软 |
 | 22 | opencode.jsonc | 落模板 → 提示填 apiKey | 软 |
 | 23-24 | workspace AGENTS.md / opencode.json | 仓库模板安装 / 提示拷贝 | 软 |
@@ -62,6 +63,25 @@ curl -fsSL https://raw.githubusercontent.com/koyomaic/business_advisor/main/boot
 | 32 | provision-local.sh 本机附加检查 | 执行 hook | 软 |
 
 硬项失败：install 模式立即中止（后续项依赖它），退出码 1；软项失败只 WARN，退出码不受影响。
+20/20b 的 PG 失败记 FAIL（退出码 1 → 钉钉预警）但不中止后续项。
+
+## 数据库后端（SQLite / PostgreSQL）
+
+缺省 SQLite（`$RELAY_WORKSPACE/relay.db`）。切换 PostgreSQL：本机 `relay.env`（不进 git）设
+
+```bash
+RELAY_DB=postgresql://USER:PASSWORD@HOST:5432/DBNAME   # 密码 URL 编码：@ → %40，+ → %2B
+```
+
+- `app/db.py` 按 URL 前缀自动识别后端，表结构首启自建，断线自动重连重试
+- 存量数据一次性迁移（切换前跑，行数自动核对）：
+  `.venv/bin/python relay-service/scripts/migrate_sqlite_to_pg.py <sqlite路径> <pg_url> [--force]`
+- 切换后 `systemctl restart relay`；清单第 20 项实测 PG 连通性，20b 自动装 pg_dump
+- 备份自动切 `pg_dump -Fc`（包内 `relay.pg.dump`，历史 relay.db 若存在一并归档）；
+  灾难恢复：`pg_restore -d <pg_url> --clean relay.pg.dump`
+- PG 后端测试：`RELAY_TEST_PG_URL=<pg_url> pytest -m pg`（服务器上建临时库，测完即删；
+  部署门禁 `-m "not integration and not pg"` 不依赖外部库）
+- 注意：多台机器指向同一 PG 库会共享成员与任务队列（调度器会互相抢任务）；多机部署请分库
 
 ## 两种模式
 

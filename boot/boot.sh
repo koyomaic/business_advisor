@@ -138,7 +138,7 @@ deploy() { # $1=sha
     fi
     "$VENV/bin/pip" install -q -r "$tmp/relay-service/requirements.txt" >>"$LOG" 2>&1 || {
       log "依赖安装失败，中止部署（现役版本不动）"; DEPLOY_FAIL_REASON="依赖安装失败（目标 $sha）"; rm -rf "$tmp"; return 1; }
-    (cd "$tmp/relay-service" && "$VENV/bin/python" -m pytest -q -m "not integration" -x) >>"$LOG" 2>&1 || {
+    (cd "$tmp/relay-service" && "$VENV/bin/python" -m pytest -q -m "not integration and not pg" -x) >>"$LOG" 2>&1 || {
       log "快速测试门禁未过，中止部署（现役版本不动）"; DEPLOY_FAIL_REASON="快速测试门禁未过（目标 $sha）"; rm -rf "$tmp"; return 1; }
     echo "$sha" > "$tmp/relay-service/VERSION"
     rm -rf "$tmp/.git"

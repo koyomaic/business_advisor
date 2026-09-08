@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import signal
 import time
 from dataclasses import dataclass, field
@@ -85,6 +86,41 @@ def _parse_claude(line: str) -> dict | None:
         if ev.get("session_id"):
             out["session_id"] = ev["session_id"]
     return out or None
+
+
+# ---- dws 消息发送二次确认门控 ----
+# 发送入口按 dws CLI --help 实测调研（shortcut + 原子命令两层）：
+#   chat shortcut: +dm/+broadcast/+send-to-group/+messages-send(+by-bot/by-webhook/card)/
+#                  +messages-batch-send-by-bot/+messages-reply/+messages-forward(+combine/topic)
+#   chat 原子:     message send/send-by-bot/send-by-webhook/send-card/reply/forward/combine-forward
+#   ding:          +send-personal、message send/send-personal/send-by-message
+# 只读命令（auth status、contact search、chat +chat-list/+chat-messages 等）不在表内，不拦。
+_DWS_SEND_PATHS = {
+    ("chat", "+dm"), ("chat", "+broadcast"), ("chat", "+send-to-group"),
+    ("chat", "+messages-send"), ("chat", "+messages-send-by-bot"),
+    ("chat", "+messages-send-by-webhook"), ("chat", "+messages-send-card"),
+    ("chat", "+messages-batch-send-by-bot"), ("chat", "+messages-reply"),
+    ("chat", "+messages-forward"), ("chat", "+messages-combine-forward"),
+    ("chat", "+messages-forward-topic"),
+    ("chat", "message", "send"), ("chat", "message", "send-by-bot"),
+    ("chat", "message", "send-by-webhook"), ("chat", "message", "send-card"),
+    ("chat", "message", "reply"), ("chat", "message", "forward"),
+    ("chat", "message", "combine-forward"),
+    ("ding", "+send-personal"), ("ding", "message", "send"),
+    ("ding", "message", "send-personal"), ("ding", "message", "send-by-message"),
+}
+# 单人接收者参数（值可逗号/空格分隔多值，或重复传 flag 累积）
+_DWS_PERSON_FLAGS = {
+    "--to", "--user", "--users", "--open-dingtalk-id", "--open-dingtalk-ids",
+    "--receiver", "--receiver-open-dingtalk-id", "--user-query",
+}
+# 群聊/会话目标参数（webhook token 的目标即 token 所在群，一并视为群发）
+_DWS_GROUP_FLAGS = {
+    "--group", "--groups", "--groups-file", "--chat-id", "--chat-query",
+    "--conversation-id", "--dest-conversation-id", "--webhook-token", "--token",
+}
+# 个别命令里同名 flag 不是发送目标：ding message send-by-message 的 --group 是源会话
+_DWS_NON_TARGET_FLAGS = {("ding", "message", "send-by-message"): {"--group"}}
 
 
 class Executor:
@@ -203,7 +239,84 @@ class Executor:
             except re.error:
                 if p.lower() in low:  # 非法正则退化为子串
                     return p
+        confirm = self._confirm_violation(cmd)
+        if confirm:
+            return confirm
         return self._rm_violation(cmd, workdir)
+
+    # ---- dws 消息发送：敏感接收人 / 多接收人 / 群聊目标 → 需人工二次确认 ----
+    # 命中后走既有 blocked → pending_approval → approve → resume(exempt) 流程，无新机制。
+
+    @staticmethod
+    def _dws_send_target(segment: str) -> tuple[tuple[str, ...], list[str], list[str]] | None:
+        """解析命令段。若是 dws 发送命令，返回 (子命令路径, 单人接收 tokens, 群/会话 tokens)。
+
+        非发送命令（含 dws 的只读命令、路径里带 dws 字的文件操作）返回 None。
+        """
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:  # 引号不闭合等退化为空白切分，取值时再手动去引号
+            tokens = segment.split()
+        for i, t in enumerate(tokens):
+            if t != "dws" and not t.endswith("/dws"):
+                # bash -c "dws chat +dm ..." 之类嵌套：对含空白的内层命令串递归解析
+                if "dws" in t and re.search(r"\s", t):
+                    nested = Executor._dws_send_target(t)
+                    if nested:
+                        return nested
+                continue
+            path: list[str] = []
+            j = i + 1
+            while j < len(tokens) and not tokens[j].startswith("-"):
+                path.append(tokens[j])
+                j += 1
+            key = tuple(path)
+            if key not in _DWS_SEND_PATHS:
+                continue
+            skip = _DWS_NON_TARGET_FLAGS.get(key, set())
+            persons: list[str] = []
+            groups: list[str] = []
+            while j < len(tokens):
+                t = tokens[j]
+                j += 1
+                if not t.startswith("--"):
+                    continue
+                name, eq, val = t.partition("=")
+                if name in skip:
+                    continue
+                is_person, is_group = name in _DWS_PERSON_FLAGS, name in _DWS_GROUP_FLAGS
+                if not is_person and not is_group:
+                    continue
+                if not eq:
+                    if j < len(tokens) and not tokens[j].startswith("-"):
+                        val = tokens[j]
+                        j += 1
+                    else:
+                        continue
+                for v in re.split(r"[,\s]+", val.strip("\"'")):
+                    if v:
+                        (persons if is_person else groups).append(v)
+            return key, persons, groups
+        return None
+
+    def _confirm_violation(self, cmd: str) -> str | None:
+        for segment in re.split(r"[;&|\n]+", cmd):
+            if "dws" not in segment:
+                continue
+            parsed = self._dws_send_target(segment)
+            if not parsed:
+                continue
+            key, persons, groups = parsed
+            target = " ".join(key)
+            for r in persons + groups:  # 整 token 精确相等，"1" 不会命中 "10"/"37505774"
+                if r in self.cfg.confirm_recipients:
+                    return f"dws {target} 接收人命中敏感对象 '{r}'，需二次确认"
+            if len(persons) >= 2:
+                return (f"dws {target} 多接收人（{len(persons)} 人: "
+                        f"{','.join(persons[:5])}），需二次确认")
+            if groups:
+                return f"dws {target} 目标为群聊/会话（{','.join(groups[:3])}），需二次确认"
+        return None
 
     # ---- 递归 rm 按路径判断：rm_safe_prefixes 与任务自身 HOME 沙箱内放行，其余拦截 ----
 

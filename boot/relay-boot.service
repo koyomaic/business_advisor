@@ -1,0 +1,10 @@
+[Unit]
+Description=Relay bootloader (git 更新部署 + 存活守护)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/team/relay-boot/boot.sh boot
+Nice=10
+TimeoutStartSec=1800

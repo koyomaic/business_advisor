@@ -7,3 +7,7 @@ relay.env
 relay-service/skills/
 .venv/
 基于ClaudeCode的经营智能体蜂群设计方案.md
+# TLS：私钥与证书目录绝不入库（ca.pem 公开，但随 skill 目录分发，不放本仓库）
+*.key
+*.pem
+relay-tls/

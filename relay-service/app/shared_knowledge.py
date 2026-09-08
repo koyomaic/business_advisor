@@ -135,56 +135,32 @@ def _sync_symlink(dst: str, src: str) -> None:
         os.symlink(src, dst)
 
 
-def seed_dws_creds(workdir: str, shared_dir: str) -> None:
-    """把 dws 凭证种子复制到新任务 HOME（$HOME/.local/share/dws-cli/）。
+def _symlink_dws_seed(workdir: str, shared_dir: str) -> None:
+    """把任务 HOME 的 dws 凭证目录软链到共享种子，所有会话共用同一份活凭证。
+
+    单一登录态 lineage：dws 刷新 token 会轮换 refresh token，软链让轮换原地
+    发生在种子上（服务器 dws-renew 定时器从种子续期并回写种子），杜绝复制
+    副本分叉后互相失效、被迫人工浏览器重新授权。
 
     - 种子不存在（shared/secrets/dws-cli-seed/dws-cli/）则静默跳过，不影响任务
-    - 目标已存在（续跑已有任务）则不覆盖，避免回滚任务内刷新过的凭证
+    - dst 已存在（旧复制模式的真实目录或旧软链）则删除后重建软链；
+      任务目录是临时的，无需备份
     """
     seed = os.path.join(shared_dir, "secrets", "dws-cli-seed", "dws-cli")
-    home = os.path.join(workdir, "home")
-    share = os.path.join(home, ".local", "share")
-    dst = os.path.join(share, "dws-cli")
     if not os.path.isdir(seed):
         return
-    if os.path.isdir(dst) and os.listdir(dst):
-        return
+    share = os.path.join(workdir, "home", ".local", "share")
+    dst = os.path.join(share, "dws-cli")
     try:
         os.makedirs(share, exist_ok=True)
-        shutil.copytree(seed, dst, copy_function=shutil.copy2,
-                        dirs_exist_ok=True)
-        os.chmod(dst, 0o700)
-        for fn in os.listdir(dst):
-            p = os.path.join(dst, fn)
-            if os.path.isfile(p):
-                os.chmod(p, 0o600)
+        if os.path.islink(dst) or os.path.exists(dst):
+            if os.path.isdir(dst) and not os.path.islink(dst):
+                shutil.rmtree(dst)
+            else:
+                os.unlink(dst)
+        os.symlink(os.path.abspath(seed), dst)
     except OSError:
         pass
-
-
-def _sync_dws_seed(workdir: str, shared_dir: str) -> None:
-    """把共享凭证种子（shared/secrets/dws-cli-seed/dws-cli）同步进任务 home。
-
-    团队约定单一 dws 服务账号：种子即团队最新登录态。只覆盖更旧的本地副本
-    （任务会话中刚登录/刷新的凭证不会被旧种子回退）。
-    """
-    seed_root = os.path.join(shared_dir, "secrets", "dws-cli-seed", "dws-cli")
-    if not os.path.isdir(seed_root):
-        return
-    dst_dir = os.path.join(workdir, "home", ".local", "share", "dws-cli")
-    os.makedirs(dst_dir, exist_ok=True)
-    for fn in os.listdir(seed_root):
-        src = os.path.join(seed_root, fn)
-        if not os.path.isfile(src):
-            continue
-        dst = os.path.join(dst_dir, fn)
-        try:
-            if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
-                continue
-            shutil.copy2(src, dst)
-            os.chmod(dst, 0o600)
-        except OSError:
-            continue
 
 
 def prepare_run(workdir: str, cfg) -> str:
@@ -193,7 +169,7 @@ def prepare_run(workdir: str, cfg) -> str:
     - opencode.json = 全局基线配置 + skills.paths 追加 shared/skills + mcp 合并 shared/mcp
     - 全局配置目录里的 node_modules/package*.json 等以符号链接复用（不重装依赖）
     - shared/memory/*.md 拼成 AGENTS.md 写入 workdir 与 home 全局位（双保险加载）
-    - dws 凭证种子复制到任务 HOME（新任务免扫码；种子缺失/已存在则跳过）
+    - dws 凭证种子软链进任务 HOME（全会话共用一份活凭证；种子缺失则跳过）
     """
     base_xdg = cfg.xdg_config_home or os.path.expanduser("~/.config")
     base_pkg = os.path.join(base_xdg, "opencode")
@@ -244,7 +220,7 @@ def prepare_run(workdir: str, cfg) -> str:
                 continue
             _sync_symlink(os.path.join(pkg, entry), os.path.join(base_pkg, entry))
 
-    _sync_dws_seed(workdir, cfg.shared_dir)
+    _symlink_dws_seed(workdir, cfg.shared_dir)
 
     mem = shared_memory_text(cfg.shared_dir)
     if mem:
@@ -253,5 +229,4 @@ def prepare_run(workdir: str, cfg) -> str:
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "w", encoding="utf-8") as f:
                 f.write(mem + "\n")
-    seed_dws_creds(workdir, cfg.shared_dir)
     return xdg

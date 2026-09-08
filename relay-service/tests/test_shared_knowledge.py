@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 
 from app.shared_knowledge import (load_shared_mcp, mcp_entry_from_file,
                                  prepare_run, shared_memory_text, slug_valid,
@@ -109,7 +108,7 @@ def test_prepare_run_no_memory_no_agents_md(tmp_path):
     assert not (workdir / "AGENTS.md").exists()
 
 
-def test_dws_seed_synced_into_home(tmp_path):
+def test_dws_seed_symlinked_into_home(tmp_path):
     sh = tmp_path / "shared"
     seed = sh / "secrets" / "dws-cli-seed" / "dws-cli"
     seed.mkdir(parents=True)
@@ -119,23 +118,31 @@ def test_dws_seed_synced_into_home(tmp_path):
     (workdir / "home").mkdir(parents=True)
     prepare_run(str(workdir), _Cfg(str(sh)))
     dst = workdir / "home" / ".local" / "share" / "dws-cli"
+    assert dst.is_symlink()
+    assert os.readlink(str(dst)) == os.path.abspath(str(seed))
+    # 透过软链读到的是种子本体（同一份活凭证，非副本）
     assert (dst / "dek").read_text() == "seed-dek"
     assert (dst / "auth-token.enc").read_text() == "seed-token"
-    assert (dst / "dek").stat().st_mode & 0o777 == 0o600
+    # 幂等：重复调用（续跑）时旧软链被重建，仍指向种子
+    prepare_run(str(workdir), _Cfg(str(sh)))
+    assert dst.is_symlink()
+    assert os.readlink(str(dst)) == os.path.abspath(str(seed))
 
 
-def test_dws_seed_newer_local_not_overwritten(tmp_path):
+def test_dws_seed_replaces_stale_copy_dir(tmp_path):
     sh = tmp_path / "shared"
     seed = sh / "secrets" / "dws-cli-seed" / "dws-cli"
     seed.mkdir(parents=True)
-    (seed / "dek").write_text("old-seed")
+    (seed / "dek").write_text("seed-dek")
     workdir = tmp_path / "wd"
     local = workdir / "home" / ".local" / "share" / "dws-cli"
     local.mkdir(parents=True)
-    (local / "dek").write_text("fresh-from-task")
-    os.utime(local / "dek", (time.time() + 60, time.time() + 60))
+    (local / "dek").write_text("stale-copy-from-old-mode")
     prepare_run(str(workdir), _Cfg(str(sh)))
-    assert (local / "dek").read_text() == "fresh-from-task"
+    # 旧复制模式残留的真实目录被替换为指向种子的软链
+    assert local.is_symlink()
+    assert os.readlink(str(local)) == os.path.abspath(str(seed))
+    assert (local / "dek").read_text() == "seed-dek"
 
 
 def test_dws_seed_missing_noop(tmp_path):

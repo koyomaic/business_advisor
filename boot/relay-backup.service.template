@@ -1,5 +1,5 @@
 [Unit]
-Description=Relay workspace backup (relay.db snapshot + shared/ + relay.log + relay.env)
+Description=Relay workspace backup (DB snapshot: sqlite/pg_dump + shared/ + relay.log + relay.env)
 After=network.target
 
 [Service]

@@ -104,7 +104,7 @@ curl -s 127.0.0.1:8787/health          # ok:true, version=远端 sha
 /opt/team/relay-boot/boot.sh update    # 守护 OK + 安装检测清单 PASS
 systemctl list-timers relay-boot.timer relay-backup.timer --no-pager
 systemctl start relay-backup           # /mnt/vol-eltaah12/backup/ 出新包
-bash /opt/team/relay-deploy/current/boot/provision.sh check   # 全 PASS
+bash /opt/team/relay-deploy/current/../boot/provision.sh check   # 全 PASS（current 指向 relay-service，boot 在上一层）
 ```
 
 ## 切流与旧机收尾

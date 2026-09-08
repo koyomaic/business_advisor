@@ -1,0 +1,7 @@
+{
+  "host": "127.0.0.1",
+  "port": 8790,
+  "baseURL": "https://your-openai-compatible-endpoint/v1",
+  "apiKey": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "model": "your-model-name"
+}

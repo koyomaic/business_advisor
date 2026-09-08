@@ -1,0 +1,19 @@
+[Unit]
+Description=Anthropic->OpenAI translation proxy for Claude Code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__DIR__
+ExecStart=__NODE__ __DIR__/proxy.mjs
+Restart=always
+RestartSec=2
+# Optional: uncomment to log request role sequences + dump last translated body
+# Environment=PROXY_DEBUG=1
+StandardOutput=append:__DIR__/proxy.log
+StandardError=append:__DIR__/proxy.log
+
+[Install]
+WantedBy=multi-user.target

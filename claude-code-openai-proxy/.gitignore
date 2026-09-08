@@ -1,0 +1,9 @@
+# real config with secrets — never commit
+config.json
+
+# logs
+*.log
+
+# deps / os
+node_modules/
+.DS_Store

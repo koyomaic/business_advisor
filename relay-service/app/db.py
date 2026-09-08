@@ -126,6 +126,11 @@ class DB:
 
     # ---- 后端内部 ----
 
+    @property
+    def backend(self) -> str:
+        """当前存储后端类型：postgresql / sqlite（/health 暴露，供人与 agent 查证）。"""
+        return "postgresql" if self._pg else "sqlite"
+
     def _pg_connect(self):
         return self._psycopg2.connect(self._pg_url, connect_timeout=10,
                                       cursor_factory=self._pg_extras.RealDictCursor)

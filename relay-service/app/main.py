@@ -648,6 +648,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             "ok": True,
             "engine": cfg.engine,
             "version": _service_version(),
+            "db": db.backend,
             "active": sched.active if sched else 0,
             "queued": sched.pending if sched else 0,
             "max_concurrent": cfg.max_concurrent,

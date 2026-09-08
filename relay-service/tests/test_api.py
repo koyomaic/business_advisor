@@ -14,6 +14,7 @@ def test_health_open(relay):
     body = r.json()
     assert body["ok"] is True
     assert body["engine"] == "opencode"
+    assert body["db"] == "sqlite"  # 测试环境用临时 SQLite；生产 PG 时返回 postgresql
     assert body["max_concurrent"] == 2
 
 

@@ -72,3 +72,35 @@ def test_core_not_over_blocked(ex):
     assert ex._is_blocked("dd if=/dev/zero of=/tmp/bench bs=1M count=10") is None  # 写文件不拦
     assert ex._is_blocked("echo ok > /dev/null") is None  # 写 /dev/null 不拦
     assert ex._is_blocked("systemctl daemon-reload") is None
+
+
+# ---- 任务 HOME 沙箱内递归 rm：~/$HOME 展开后放行（凭证同步等合法操作不再误拦） ----
+
+WORKDIR = "/mnt/ws/tasks/42"
+THOME = WORKDIR + "/home"
+
+
+def test_rm_task_home_allowed(ex):
+    assert ex._is_blocked('rm -rf "$HOME/.local/share/dws-cli/dws-cli"', WORKDIR) is None
+    assert ex._is_blocked("rm -rf $HOME/.cache", WORKDIR) is None
+    assert ex._is_blocked("rm -rf ${HOME}/.cache", WORKDIR) is None
+    assert ex._is_blocked("rm -rf ~/.local/share/dws-cli", WORKDIR) is None
+    assert ex._is_blocked(f"rm -rf {THOME}/tmp-x", WORKDIR) is None
+    assert ex._is_blocked("rm -rf $HOME", WORKDIR) is None  # 整个沙箱也是自己的
+
+
+def test_rm_task_home_real_case(ex):
+    # 任务 #9 被误拦的真实命令：同步 /root 新凭证进任务 HOME
+    cmd = ('rm -rf "$HOME/.local/share/dws-cli/dws-cli" && '
+           'cp /root/.local/share/dws-cli/auth-token.enc "$HOME/.local/share/dws-cli/" 2>&1; '
+           'ls -la "$HOME/.local/share/dws-cli/"')
+    assert ex._is_blocked(cmd, WORKDIR) is None
+
+
+def test_rm_task_home_still_guarded(ex):
+    assert ex._is_blocked("rm -rf $HOME/../../../../etc", WORKDIR) is not None  # .. 逃逸规范化后拦截
+    assert ex._is_blocked("rm -rf /root", WORKDIR) is not None  # 系统路径照拦
+    assert ex._is_blocked("rm -rf $HOME/x") is not None  # 无 workdir 上下文时保持旧行为
+    assert ex._is_blocked('rm -rf "$DIR/x"', WORKDIR) is not None  # 其它变量无法展开
+    assert ex._is_blocked("rm -rf ./cache", WORKDIR) is not None  # 相对路径照拦
+    assert ex._is_blocked("rm -rf /tmp/a $HOME/../../shared/knowledge", WORKDIR) is not None  # 混有逃逸目标

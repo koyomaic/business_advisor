@@ -394,7 +394,7 @@ class DashTokenBody(BaseModel):
 
 
 def _shared_path(shared_dir: str, rel: str) -> str:
-    """把相对路径解析到共享区内；拒绝绝对路径与任何路径穿越。"""
+    """把相对路径解析到共享区内；拒绝绝对路径、任何路径穿越与 secrets/ 凭证目录。"""
     rel = (rel or "").strip()
     if not rel or rel.startswith("/") or "\x00" in rel:
         raise HTTPException(status_code=400, detail="path must be relative to shared dir")
@@ -405,6 +405,10 @@ def _shared_path(shared_dir: str, rel: str) -> str:
     full = os.path.realpath(os.path.join(base, norm))
     if not (full == base or full.startswith(base + os.sep)):
         raise HTTPException(status_code=400, detail="path escapes shared dir")
+    secrets_root = os.path.realpath(os.path.join(base, "secrets"))
+    if full == secrets_root or full.startswith(secrets_root + os.sep):
+        raise HTTPException(status_code=403,
+                            detail="secrets dir is not accessible via files API")
     return full
 
 

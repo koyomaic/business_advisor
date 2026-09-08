@@ -73,3 +73,36 @@ def test_files_require_auth(relay):
     r = httpx.post(relay["base"] + "/files",
                    json={"path": "x.txt", "content_b64": "aGk="}, timeout=10)
     assert r.status_code == 401
+
+
+# ---- secrets/ 凭证目录不经 files API 出入（凭证不出服务器） ----
+
+def test_secrets_download_blocked(member, relay):
+    d = relay["ws"] / "shared" / "secrets" / "dws-cli-seed" / "dws-cli"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "auth-token.enc").write_bytes(b"top-secret")
+    r = member.get("/files", params={"path": "secrets/dws-cli-seed/dws-cli/auth-token.enc"})
+    assert r.status_code == 403
+    # 规范化绕路同样拦截
+    r = member.get("/files", params={"path": "knowledge/../secrets/dws-cli-seed/dws-cli/auth-token.enc"})
+    assert r.status_code == 403
+
+
+def test_secrets_upload_blocked(member):
+    r = member.post("/files", json={
+        "path": "secrets/evil.txt",
+        "content_b64": base64.b64encode(b"x").decode(),
+    })
+    assert r.status_code == 403
+
+
+def test_secrets_symlink_escape_blocked(member, relay):
+    import os
+    shared = relay["ws"] / "shared"
+    (shared / "secrets").mkdir(exist_ok=True)
+    (shared / "secrets" / "cred.enc").write_bytes(b"top-secret")
+    link = shared / "innocent"
+    if not link.is_symlink():
+        os.symlink(shared / "secrets", link)
+    r = member.get("/files", params={"path": "innocent/cred.enc"})
+    assert r.status_code == 403

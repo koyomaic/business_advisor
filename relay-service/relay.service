@@ -5,6 +5,8 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/mnt/vol-eltaah12/finaagent/relay-service
+# 两层配置：全机队默认值（随 release 发布，缺失不阻塞启动）→ 本机 relay.env（密钥+覆盖项）
+EnvironmentFile=-/mnt/vol-eltaah12/finaagent/relay-service/relay.defaults.env
 EnvironmentFile=/mnt/vol-eltaah12/workspace/relay.env
 ExecStart=/mnt/vol-eltaah12/finaagent/.venv/bin/python -m uvicorn app.entry:app --host 0.0.0.0 --port 8787
 Restart=on-failure

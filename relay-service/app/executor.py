@@ -176,7 +176,7 @@ class Executor:
                 if parsed.get("agent_event"):
                     publish(task_id, t="agent", **parsed["agent_event"])
                 cmd = parsed.get("tool_cmd")
-                if cmd and self._is_blocked(cmd) and not self._exempt(cmd, exempt_cmd):
+                if cmd and self._is_blocked(cmd, workdir) and not self._exempt(cmd, exempt_cmd):
                     self._kill(proc)
                     res.blocked_cmd = cmd
                     res.error = f"blocked: {cmd[:200]}"
@@ -192,7 +192,7 @@ class Executor:
             res.error = f"agent exited with code {proc.returncode}: {tail}"
         return res
 
-    def _is_blocked(self, cmd: str) -> str | None:
+    def _is_blocked(self, cmd: str, workdir: str = "") -> str | None:
         low = cmd.lower()
         for p in self.cfg.blocked_patterns:
             if not p:
@@ -203,9 +203,9 @@ class Executor:
             except re.error:
                 if p.lower() in low:  # 非法正则退化为子串
                     return p
-        return self._rm_violation(cmd)
+        return self._rm_violation(cmd, workdir)
 
-    # ---- 递归 rm 按路径判断：rm_safe_prefixes 下放行，其余拦截 ----
+    # ---- 递归 rm 按路径判断：rm_safe_prefixes 与任务自身 HOME 沙箱内放行，其余拦截 ----
 
     @staticmethod
     def _rm_targets(segment: str) -> tuple[bool, list[str]]:
@@ -226,21 +226,41 @@ class Executor:
                 paths.append(a)
         return recursive, paths
 
-    def _rm_path_safe(self, p: str) -> bool:
-        if not p.startswith("/"):  # 相对路径/变量/~：无法验证，拦截
+    @staticmethod
+    def _resolve_rm_path(p: str, home: str) -> str:
+        """去引号、把开头的 ~/$HOME/${HOME} 展开为任务真实 HOME，再规范化（防 .. 逃逸）。"""
+        if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'":
+            p = p[1:-1]
+        if home:
+            if p in ("~", "$HOME", "${HOME}"):
+                p = home
+            elif p.startswith("~/"):
+                p = home + p[1:]
+            elif p.startswith("$HOME/"):
+                p = home + p[len("$HOME"):]
+            elif p.startswith("${HOME}/"):
+                p = home + p[len("${HOME}"):]
+        return os.path.normpath(p) if p.startswith("/") else p
+
+    def _rm_path_safe(self, p: str, home: str = "") -> bool:
+        p = self._resolve_rm_path(p, home)
+        if not p.startswith("/"):  # 相对路径/无法展开的变量：无法验证，拦截
             return False
         for root in self.cfg.rm_safe_prefixes:
             if p == root or p.startswith(root + "/"):
                 return True
+        if home and (p == home or p.startswith(home + "/")):
+            return True  # 任务自身 HOME 沙箱（物理隔离），触不到共享区/系统目录
         return False
 
-    def _rm_violation(self, cmd: str) -> str | None:
+    def _rm_violation(self, cmd: str, workdir: str = "") -> str | None:
+        home = os.path.join(workdir, "home") if workdir else ""
         for segment in re.split(r"[;&|\n]+", cmd):
             recursive, paths = self._rm_targets(segment)
             if not recursive:
                 continue
             for p in paths:
-                if not self._rm_path_safe(p):
+                if not self._rm_path_safe(p, home):
                     return f"recursive rm outside safe dirs: {p}"
         return None
 

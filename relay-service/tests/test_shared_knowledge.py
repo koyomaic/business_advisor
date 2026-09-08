@@ -10,9 +10,10 @@ from app.shared_knowledge import (load_shared_mcp, mcp_entry_from_file,
 
 
 class _Cfg:
-    def __init__(self, shared_dir: str, xdg: str = ""):
+    def __init__(self, shared_dir: str, xdg: str = "", exclude: list | None = None):
         self.shared_dir = shared_dir
         self.xdg_config_home = xdg
+        self.relay_exclude_providers = exclude or []
 
 
 def test_strip_jsonc_keeps_urls_and_drops_comments():
@@ -144,3 +145,45 @@ def test_dws_seed_missing_noop(tmp_path):
     (workdir / "home").mkdir(parents=True)
     prepare_run(str(workdir), _Cfg(str(sh)))
     assert not (workdir / "home" / ".local").exists()
+
+
+def _base_xdg_with_providers(tmp_path):
+    base = tmp_path / "basecfg" / "opencode"
+    base.mkdir(parents=True)
+    (base / "opencode.json").write_text(json.dumps({
+        "provider": {
+            "prod": {"npm": "x", "models": {"old": {}}},
+            "local-only": {"npm": "x", "models": {"new": {}}},
+        },
+        "model": "prod/old",
+    }))
+    return str(tmp_path / "basecfg")
+
+
+def test_prepare_run_excludes_local_only_provider(tmp_path):
+    sh = tmp_path / "shared"
+    (sh / "skills").mkdir(parents=True)
+    workdir = tmp_path / "wd"
+    (workdir / "home").mkdir(parents=True)
+    xdg = prepare_run(str(workdir),
+                      _Cfg(str(sh), xdg=_base_xdg_with_providers(tmp_path),
+                           exclude=["local-only"]))
+    cfg = json.load(open(os.path.join(xdg, "opencode", "opencode.json"),
+                         encoding="utf-8"))
+    assert "local-only" not in cfg["provider"]
+    assert "prod" in cfg["provider"]
+    assert cfg["model"] == "prod/old"
+
+
+def test_prepare_run_exclude_never_removes_default_model_provider(tmp_path):
+    sh = tmp_path / "shared"
+    (sh / "skills").mkdir(parents=True)
+    workdir = tmp_path / "wd"
+    (workdir / "home").mkdir(parents=True)
+    xdg = prepare_run(str(workdir),
+                      _Cfg(str(sh), xdg=_base_xdg_with_providers(tmp_path),
+                           exclude=["prod", "local-only"]))
+    cfg = json.load(open(os.path.join(xdg, "opencode", "opencode.json"),
+                         encoding="utf-8"))
+    assert "prod" in cfg["provider"]      # 默认模型所在 provider 保留
+    assert "local-only" not in cfg["provider"]

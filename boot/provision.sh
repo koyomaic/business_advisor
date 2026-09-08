@@ -289,8 +289,9 @@ else
   fi
 fi
 
-# ---------- 18b pg_dump 客户端（仅 PG 模式：备份一致性快照必需） ----------
-if [ "$PG_MODE" = 1 ]; then
+# ---------- 18b pg_dump 客户端（仅 PG 模式且本机负责 DB 备份时必需；RELAY_BACKUP_SKIP_DB=1 时跳过） ----------
+SKIP_DB_VAL="$(sed -n 's/^RELAY_BACKUP_SKIP_DB=//p' "$WORKSPACE/relay.env" 2>/dev/null | tail -1 || true)"
+if [ "$PG_MODE" = 1 ] && [ "$SKIP_DB_VAL" != 1 ]; then
   step "pg_dump客户端"
   if command -v pg_dump >/dev/null 2>&1; then ok
   elif heal; then

@@ -20,13 +20,23 @@ fail() {
 [[ -d "$WORKSPACE" ]] || fail "workspace not found: $WORKSPACE"
 
 # DB 模式：relay.env 的 RELAY_DB 为 postgresql:// URL 时走 pg_dump，否则/缺省走 SQLite 快照
+# RELAY_BACKUP_SKIP_DB=1：DB 备份由外部负责（如云管理部门统一备份 PG），本机只备工作区文件
 RELAY_DB="$(sed -n 's/^RELAY_DB=//p' "$WORKSPACE/relay.env" 2>/dev/null | tail -1 || true)"
+SKIP_DB="$(sed -n 's/^RELAY_BACKUP_SKIP_DB=//p' "$WORKSPACE/relay.env" 2>/dev/null | tail -1 || true)"
 
 mkdir -p "$BACKUP_DIR"
 
 WARNING=""
 DB_ARGS=()
-if [[ "$RELAY_DB" == postgres*://* ]]; then
+DB_MODE="sqlite"
+if [[ "$SKIP_DB" == "1" ]]; then
+  # 不做 DB 快照；历史 SQLite 文件若仍在则一并归档（本地文件，非外部备份范围）
+  DB_MODE="skipped(external)"
+  if [[ -f "$WORKSPACE/relay.db" ]]; then
+    DB_ARGS+=(-C "$WORKSPACE" relay.db)
+  fi
+elif [[ "$RELAY_DB" == postgres*://* ]]; then
+  DB_MODE="pg_dump"
   command -v pg_dump >/dev/null 2>&1 || fail "pg_dump not found (install postgresql-client)"
   pg_dump --dbname="$RELAY_DB" -Fc -f "$STAGE/relay.pg.dump" || fail "pg_dump failed"
   pg_restore --list "$STAGE/relay.pg.dump" >/dev/null 2>&1 || fail "pg_dump archive verification failed"
@@ -49,7 +59,12 @@ else
 fi
 
 # package: shared/ + relay.log + relay.env from workspace, DB snapshot from staging
-tar -czf "$DEST" -C "$WORKSPACE" shared relay.log relay.env "${DB_ARGS[@]}"
+# （RELAY_BACKUP_SKIP_DB=1 时 DB_ARGS 可能为空，仅工作区文件）
+if (( ${#DB_ARGS[@]} )); then
+  tar -czf "$DEST" -C "$WORKSPACE" shared relay.log relay.env "${DB_ARGS[@]}"
+else
+  tar -czf "$DEST" -C "$WORKSPACE" shared relay.log relay.env
+fi
 chmod 600 "$DEST"
 
 # verify archive is readable
@@ -72,7 +87,7 @@ KEPT=$(( TOTAL - DELETED ))
 
 SIZE="$(stat -c %s "$DEST")"
 if [[ -n "$WARNING" ]]; then
-  printf '{"ok":true,"file":"%s","size_bytes":%s,"kept":%s,"warning":"%s"}\n' "$DEST" "$SIZE" "$KEPT" "$WARNING"
+  printf '{"ok":true,"file":"%s","size_bytes":%s,"kept":%s,"db":"%s","warning":"%s"}\n' "$DEST" "$SIZE" "$KEPT" "$DB_MODE" "$WARNING"
 else
-  printf '{"ok":true,"file":"%s","size_bytes":%s,"kept":%s}\n' "$DEST" "$SIZE" "$KEPT"
+  printf '{"ok":true,"file":"%s","size_bytes":%s,"kept":%s,"db":"%s"}\n' "$DEST" "$SIZE" "$KEPT" "$DB_MODE"
 fi

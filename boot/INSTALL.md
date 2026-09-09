@@ -10,6 +10,7 @@
 | 中转服务 | `relay.service` | uvicorn :8787，代码在 `CURRENT_LINK`（release 软链） |
 | git 同步部署 | `relay-boot.timer` → `boot.sh` | 每日 01:00 + 开机 2min：拉新→测试门禁→上线/回滚→**跑 provision 清单**→失败钉钉预警 |
 | 工作区备份 | `relay-backup.timer` → `scripts/backup.sh` | 每日 03:30：数据库快照（SQLite `.backup` 或 PG `pg_dump -Fc`）+ shared/ + relay.env + relay.log → `/mnt/vol-eltaah12/backup/` |
+| dws 登录态小时级刷新 | `dws-refresh.timer` → `dws-refresh.sh` | 每小时整点（±60s 抖动）：软链共享种子进临时 HOME 跑 `auth status`，token 刷新原地发生在种子上（与 boot 预警同一份登录态）；日志 `/var/log/dws-refresh.log`；登录态失效时清单 WARN，需人工设备码重授权 |
 | Claude 代理 | `claude-proxy.service` | 可选：Anthropic→OpenAI 翻译代理 :8790 |
 | TLS 代理 | `relay-tls-proxy.service` | 可选：仅 HTTPS 主机（有 relay-tls 证书才装），socat :8788→:8787 |
 

@@ -1,0 +1,6 @@
+[Unit]
+Description=dws login state hourly refresh (shared seed)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/team/relay-boot/dws-refresh.sh

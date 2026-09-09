@@ -315,6 +315,25 @@ step "dws登录态种子"
 if [ -d "$DWS_SEED" ]; then ok
 else warn "缺失：钉钉预警/dws 不可用；从旧机拷贝 $DWS_SEED 或本机 dws 登录"; fi
 
+# ---------- 19b dws-refresh 小时级刷新（脚本+单元+定时器，SOFT） ----------
+# 每小时整点（±60s 抖动）软链共享种子跑 auth status，刷新原地发生在种子上；
+# 日志 /var/log/dws-refresh.log；登录态失效时本项 WARN，需人工设备码重授权
+step "dws-refresh脚本"
+if [ -f "$BOOT_DIR/dws-refresh.sh" ] && cmp -s "$RES_ROOT/boot/dws-refresh.sh" "$BOOT_DIR/dws-refresh.sh"; then ok
+elif heal; then
+  miss "从资源树同步"
+  cp "$RES_ROOT/boot/dws-refresh.sh" "$BOOT_DIR/dws-refresh.sh" && chmod 700 "$BOOT_DIR/dws-refresh.sh" && ok "已同步" || bad "同步失败"
+else bad "缺失"; fi
+sync_unit "dws-refresh.service" "$RES_ROOT/boot/dws-refresh.service" dws-refresh.service copy no
+sync_unit "dws-refresh.timer"   "$RES_ROOT/boot/dws-refresh.timer"   dws-refresh.timer   copy no
+step "dws-refresh定时器"
+if systemctl is-enabled --quiet dws-refresh.timer 2>/dev/null && systemctl is-active --quiet dws-refresh.timer; then ok
+elif heal; then
+  miss "启用"
+  systemctl enable --now dws-refresh.timer 2>/dev/null
+  systemctl is-active --quiet dws-refresh.timer && ok "已启用" || bad "无法激活"
+else bad "未启用"; fi
+
 # ---------- 20 opencode.jsonc（模型 provider+密钥，SOFT） ----------
 step "opencode.jsonc"
 if [ -f "$OC_CONFIG" ] && ! grep -q 'sk-REPLACE_ME' "$OC_CONFIG"; then ok

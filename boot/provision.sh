@@ -148,7 +148,12 @@ ins_node()     {
     dnf module install -y nodejs:22 >/dev/null 2>&1 || dnf install -y -q nodejs npm >/dev/null 2>&1
   else return 1; fi; }
 chk_opencode() { command -v opencode >/dev/null && [ "$(opencode --version 2>/dev/null | head -1)" = "$OPENCODE_VER" ]; }
-ins_opencode() { npm install -g --no-fund --no-audit "opencode-ai@$OPENCODE_VER" >/dev/null 2>&1; }
+ins_opencode() { # npm 偶发跳过 postinstall（bin 占位符报 "postinstall script was not run"），装完验证、失败则手动补跑修复
+  npm install -g --no-fund --no-audit "opencode-ai@$OPENCODE_VER" >/dev/null 2>&1
+  if ! opencode --version >/dev/null 2>&1; then
+    (cd "$(npm root -g)/opencode-ai" && node postinstall.mjs) >/dev/null 2>&1 || true
+  fi
+}
 chk_dws()      { command -v dws >/dev/null && npm ls -g dingtalk-workspace-cli 2>/dev/null | grep -q "dingtalk-workspace-cli@$DWS_VER"; }
 ins_dws()      { npm install -g --no-fund --no-audit "dingtalk-workspace-cli@$DWS_VER" >/dev/null 2>&1; }
 

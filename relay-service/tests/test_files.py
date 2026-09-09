@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 
 import httpx
 
@@ -65,6 +66,17 @@ def test_download_missing_file(member):
 def test_invalid_base64_rejected(member):
     r = member.post("/files", json={"path": "x.txt", "content_b64": "not-base64!!!"})
     assert r.status_code == 400
+
+
+def test_upload_audit_records_sha256(member, relay):
+    payload = b"audit-me"
+    r = member.post("/files", json={
+        "path": "data/audit.bin",
+        "content_b64": base64.b64encode(payload).decode(),
+    })
+    assert r.status_code == 201, r.text
+    log = (relay["ws"] / "relay.log").read_text(encoding="utf-8")
+    assert f"file_upload\tdata/audit.bin ({len(payload)}B sha256={hashlib.sha256(payload).hexdigest()})" in log
 
 
 def test_files_require_auth(relay):

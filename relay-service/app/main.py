@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import re
@@ -26,6 +27,8 @@ STREAM_END = TERMINAL | {"review"}
 DASH_COOKIE = "relay_dash"
 DASH_TTL = 12 * 3600
 MAX_FILE_BYTES = 1 * 1024 * 1024  # 文件上传/下载通道单文件上限 1MB
+LOGIN_MAX_FAILS = 5               # dashboard 登录：窗口内同 IP 失败达此次数 → 锁定（防爆破底线）
+LOGIN_LOCK_SEC = 15 * 60          # 锁定与滑动窗口时长：15 分钟
 
 LOGIN_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -466,6 +469,11 @@ def sweep_stale(db, bus, audit, cfg) -> list[int]:
 
 def create_app(cfg: Settings | None = None) -> FastAPI:
     cfg = cfg or Settings.from_env()
+    if cfg.admin_token in ("", "change-me"):
+        raise RuntimeError(
+            "RELAY_ADMIN_TOKEN 未设置或仍为默认值 change-me，拒绝启动"
+            "（admin 接口可触发部署 /admin/update）。"
+            "请在 relay.env 设置强随机 token，如：openssl rand -hex 24")
     for d in (cfg.shared_dir, cfg.task_root, cfg.users_root):
         os.makedirs(d, exist_ok=True)
     os.makedirs(os.path.join(cfg.shared_dir, "knowledge"), exist_ok=True)
@@ -831,7 +839,8 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         os.makedirs(os.path.dirname(full) or cfg.shared_dir, exist_ok=True)
         with open(full, "wb") as f:
             f.write(data)
-        audit.line(0, principal["name"], "file_upload", f"{body.path} ({len(data)}B)")
+        audit.line(0, principal["name"], "file_upload",
+                   f"{body.path} ({len(data)}B sha256={hashlib.sha256(data).hexdigest()})")
         return {"ok": True, "path": body.path, "size": len(data)}
 
     @app.get("/files")
@@ -946,7 +955,8 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         os.makedirs(os.path.dirname(full) or sdir, exist_ok=True)
         with open(full, "wb") as f:
             f.write(data)
-        audit.line(0, "__dashboard__", "shared_skill_upload", f"{name}/{norm} ({len(data)}B)")
+        audit.line(0, "__dashboard__", "shared_skill_upload",
+                   f"{name}/{norm} ({len(data)}B sha256={hashlib.sha256(data).hexdigest()})")
         return {"ok": True, "name": name, "file": norm, "size": len(data),
                 "note": "立即生效：下一个任务自动加载"}
 
@@ -969,9 +979,11 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="config must be a non-empty JSON object")
         root = os.path.join(cfg.shared_dir, "mcp")
         os.makedirs(root, exist_ok=True)
-        with open(os.path.join(root, name + ".json"), "w", encoding="utf-8") as f:
-            json.dump(body.config, f, ensure_ascii=False, indent=2)
-        audit.line(0, "__dashboard__", "shared_mcp_upload", name)
+        raw = json.dumps(body.config, ensure_ascii=False, indent=2).encode("utf-8")
+        with open(os.path.join(root, name + ".json"), "wb") as f:
+            f.write(raw)
+        audit.line(0, "__dashboard__", "shared_mcp_upload",
+                   f"{name} ({len(raw)}B sha256={hashlib.sha256(raw).hexdigest()})")
         return {"ok": True, "name": name, "note": "立即生效：下一个任务自动加载"}
 
     @app.delete("/dashboard/shared/mcp/{name}")
@@ -993,9 +1005,11 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=413, detail="content exceeds 1MB")
         root = os.path.join(cfg.shared_dir, "memory")
         os.makedirs(root, exist_ok=True)
-        with open(os.path.join(root, name + ".md"), "w", encoding="utf-8") as f:
-            f.write(body.content)
-        audit.line(0, "__dashboard__", "shared_memory_upload", name)
+        raw = body.content.encode("utf-8")
+        with open(os.path.join(root, name + ".md"), "wb") as f:
+            f.write(raw)
+        audit.line(0, "__dashboard__", "shared_memory_upload",
+                   f"{name} ({len(raw)}B sha256={hashlib.sha256(raw).hexdigest()})")
         return {"ok": True, "name": name,
                 "note": "立即生效：下一个任务起自动注入全员 agent 的 AGENTS.md"}
 
@@ -1056,6 +1070,16 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
                 "note": "更新已后台触发；轮询 GET /health 的 version 字段确认到达新 git SHA"}
 
     dash_sessions: dict[str, float] = {}
+    login_fails: dict[str, list[float]] = {}  # ip -> 窗口内失败时间戳（登录防爆破）
+
+    def _login_locked(ip: str) -> bool:
+        now = time.time()
+        ts = [t for t in login_fails.get(ip, ()) if now - t < LOGIN_LOCK_SEC]
+        if ts:
+            login_fails[ip] = ts
+        else:
+            login_fails.pop(ip, None)
+        return len(ts) >= LOGIN_MAX_FAILS
 
     def _dash_ok(request: Request) -> bool:
         if not cfg.dashboard_password:
@@ -1093,15 +1117,27 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="not found")
         if _dash_ok(request):
             return DASH_HTML
-        err = '<div class="err">口令错误，请重试</div>' if request.query_params.get("e") else ""
+        e = request.query_params.get("e")
+        err = ""
+        if e == "1":
+            err = '<div class="err">口令错误，请重试</div>'
+        elif e == "2":
+            err = '<div class="err">尝试次数过多，请 15 分钟后再试</div>'
         return LOGIN_HTML.replace("__ERR__", err)
 
     @app.post("/login")
-    async def dashboard_login(password: str = Form(default="")):
+    async def dashboard_login(request: Request, password: str = Form(default="")):
         if not cfg.dashboard_password:
             raise HTTPException(status_code=404, detail="not found")
+        ip = request.client.host if request.client else "?"
+        if _login_locked(ip):
+            return RedirectResponse("/?e=2", status_code=303)
         if not secrets.compare_digest(password, cfg.dashboard_password):
+            fails = login_fails.setdefault(ip, [])
+            fails.append(time.time())
+            audit.line(0, "__dashboard__", "login_fail", f"ip={ip} n={len(fails)}")
             return RedirectResponse("/?e=1", status_code=303)
+        login_fails.pop(ip, None)
         tok = secrets.token_urlsafe(24)
         dash_sessions[tok] = time.time() + DASH_TTL
         resp = RedirectResponse("/", status_code=302)

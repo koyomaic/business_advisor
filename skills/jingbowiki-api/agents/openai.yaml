@@ -1,0 +1,4 @@
+interface:
+  display_name: "jingboWiki 接口"
+  short_description: "查询与调用 jingboWiki 接口，支持知识上传、查询与检索"
+  default_prompt: "使用 $jingbowiki-api 查询接口并连接已配置的 jingboWiki 服务。"

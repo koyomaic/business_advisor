@@ -43,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/koyomaic/business_advisor/main/boot
 | 02 | 目录布局（/mnt/vol-eltaah12/*、/opt/team/*） | mkdir -p | 硬 |
 | 03-05 | git / curl·tar·openssl / sqlite3 | apt/dnf 安装 | 硬 |
 | 06-07 | python3≥3.10+venv / node≥20+npm | apt/dnf（node 走 NodeSource 22.x） | 硬 |
-| 08-09 | opencode-ai@1.18.29 / dingtalk-workspace-cli@1.0.61 | npm -g 安装（版本钉死） | 硬 |
+| 08-09 | opencode-ai≥1.18.29（sort -V 比较，新版不降级）/ dingtalk-workspace-cli@1.0.61 | npm -g 安装；opencode 装后验证 --version，npm 跳过 postinstall 时手动补跑 | 硬 |
 | 10 | 资源树（release/现役树，否则临时 clone） | git clone | 硬 |
 | 11 | venv+依赖（fastapi/uvicorn/httpx/pytest/psycopg2 可导入） | venv + pip -r requirements.txt（阿里云镜像） | 硬 |
 | 12-13 | boot.env / boot.sh | 生成标准布局 / 从资源树同步(700) | 硬 |
@@ -54,6 +54,7 @@ curl -fsSL https://raw.githubusercontent.com/koyomaic/business_advisor/main/boot
 | 21 | dws 登录态种子 | 提示拷贝/登录 | 软 |
 | 22 | opencode.jsonc | 落模板 → 提示填 apiKey | 软 |
 | 23-24 | workspace AGENTS.md / opencode.json | 仓库模板安装 / 提示拷贝 | 软 |
+| 24b | 基础技能：仅仓库 `skills/` 内人为标记入库的（机队共享，git 为真源），逐文件比对 `shared/skills/` 同名技能 | 缺失/漂移 → 本地旧版备份 `*.bak-provision-*` 后同步仓库版；未入库的本地/实验技能不碰 | 软 |
 | 25-26 | claude-proxy / relay-tls-proxy | 缺则装（tls 仅证书存在时） | 软 |
 | 27 | 首装引导（无现役 release → boot.sh boot 完整部署） | 自动 | 硬 |
 | 28 | relay active+healthy | enable/start/restart | 硬 |
@@ -82,6 +83,19 @@ RELAY_DB=postgresql://USER:PASSWORD@HOST:5432/DBNAME   # 密码 URL 编码：@ �
 - PG 后端测试：`RELAY_TEST_PG_URL=<pg_url> pytest -m pg`（服务器上建临时库，测完即删；
   部署门禁 `-m "not integration and not pg"` 不依赖外部库）
 - 注意：多台机器指向同一 PG 库会共享成员与任务队列（调度器会互相抢任务）；多机部署请分库
+
+## 基础技能（仓库 skills/，机队共享）
+
+`shared/skills/` 下的技能分两类：
+
+- **基础技能**：经人特别标记入库到仓库 `skills/` 目录的（入库即标记），机队共享、git 为真源。
+  provision 清单 24b 逐文件比对并自愈：本机缺失/漂移 → 本地旧版备份 `*.bak-provision-*` 后同步仓库版。
+- **本地/实验技能**：未入库的，git 与 provision 均不碰，各机自由增改。
+
+标记新基础技能（管理员操作）：把技能目录拷入仓库 `skills/`（剔除 `*.bak*`、zip、`__pycache__`、运行时状态文件；
+**严禁入库任何密钥**，凭据一律放 `shared/secrets/`）→ commit + push；各机夜间轮次自动同步。
+修改基础技能：改仓库（或改本机后提交回仓库）；只改本机不提交，夜间自愈会以仓库版覆盖（有备份）。
+当前基础技能：`jingbowiki-api`（jingboWiki 知识库接口，共享知识优先权威源）。
 
 ## 两种模式
 

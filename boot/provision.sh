@@ -331,6 +331,47 @@ if [ -f "$WORKSPACE/AGENTS.md" ]; then ok
 elif heal && [ -f "$RES_ROOT/boot/workspace-AGENTS.md" ] && cp "$RES_ROOT/boot/workspace-AGENTS.md" "$WORKSPACE/AGENTS.md"; then ok "已从仓库模板安装"
 else warn "缺失且无模板"; fi
 
+# ---------- 21b 基础技能（人为标记入库到仓库 skills/ 的机队共享技能；git 为真源 → workspace/shared/skills/） ----------
+# 只有仓库 skills/ 里存在的技能才检查/同步（入库即标记）；shared/skills 下其余本地/实验技能不碰。
+# 逐文件比对，漂移/缺失 → 本地旧版备份 *.bak-provision-* 后同步仓库版。
+step "基础技能(git)"
+SK_DST="$WORKSPACE/shared/skills"
+if ! ls -d "$RES_ROOT"/skills/*/ >/dev/null 2>&1; then
+  warn "仓库无基础技能（skills/ 为空），跳过"
+else
+  SK_MISS=""; SK_DRIFT=""; SK_N=0
+  sk_drift_files() { # $1=repo技能目录 $2=目标技能目录；输出缺失/漂移的相对文件列表
+    local f rel
+    while IFS= read -r f; do
+      rel="${f#"$1"}"
+      cmp -s "$f" "$2/$rel" || printf '%s\n' "$rel"
+    done < <(find "$1" -type f)
+  }
+  for src in "$RES_ROOT"/skills/*/; do
+    name="$(basename "$src")"; SK_N=$((SK_N+1))
+    if [ ! -d "$SK_DST/$name" ]; then SK_MISS="$SK_MISS $name"; continue; fi
+    d="$(sk_drift_files "$src" "$SK_DST/$name")"
+    [ -n "$d" ] && SK_DRIFT="$SK_DRIFT $name($(echo "$d" | tr '\n' ' '))"
+  done
+  if [ -z "$SK_MISS$SK_DRIFT" ]; then ok "$SK_N 个基础技能与仓库一致"
+  elif ! heal; then warn "与仓库不一致:${SK_MISS:+ 缺失$SK_MISS}${SK_DRIFT:+ 漂移$SK_DRIFT}（install 模式自动同步）"
+  else
+    miss "同步${SK_MISS}${SK_DRIFT}"
+    stamp="$(date +%Y%m%d-%H%M)"; n_sync=0
+    for src in "$RES_ROOT"/skills/*/; do
+      name="$(basename "$src")"; mkdir -p "$SK_DST/$name"
+      while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        [ -f "$SK_DST/$name/$rel" ] && cp "$SK_DST/$name/$rel" "$SK_DST/$name/$rel.bak-provision-$stamp"
+        mkdir -p "$(dirname "$SK_DST/$name/$rel")"
+        cp "$src/$rel" "$SK_DST/$name/$rel" || abort "技能 $name/$rel 同步失败"
+        n_sync=$((n_sync+1))
+      done < <(sk_drift_files "$src" "$SK_DST/$name")
+    done
+    ok "$SK_N 个技能，同步 $n_sync 文件（本地旧版备份 *.bak-provision-$stamp）"
+  fi
+fi
+
 # ---------- 22 workspace opencode.json（内网 MCP，SOFT） ----------
 step "workspace MCP配置"
 if [ -f "$WORKSPACE/opencode.json" ]; then ok

@@ -1,8 +1,10 @@
 # 工作区约定（服务器任务 agent 必读）
 
-## 动手前
+## 动手前（共享知识检索顺序）
 
-先查 `/mnt/vol-eltaah12/workspace/shared/knowledge/` 下对应主题目录（里面有《中转服务使用说明.md》《team-agent-relay-SKILL.md》等团队沉淀）。有现成经验就用，不要重复摸索。
+1. **优先权威源：jingboWiki**——用 `jingbowiki-api` 技能检索（快速检索 `POST /knowledge-search`；凭据 `shared/secrets/jingbowiki.env`，健康检查 `http://10.200.3.235:18082/health`）。团队知识以 jingboWiki 为准。
+2. 本地兜底：`/mnt/vol-eltaah12/workspace/shared/knowledge/` 对应主题目录（《中转服务使用说明.md》《team-agent-relay-SKILL.md》等）；jingboWiki 不可达或未命中时再查。
+3. 两处内容冲突时，以 jingboWiki 为准。有现成经验就用，不要重复摸索。
 
 ## 可用 CLI
 
@@ -13,7 +15,7 @@
 ## 共享区约定（shared/）
 
 - `shared/` 是团队共享区，**不要静默覆盖他人文件**；改动已有共享文件前先保留原版本
-- 任务产生的可复用经验写入 `shared/knowledge/` 对应主题目录
+- 任务产生的可复用经验写入 `shared/knowledge/` 对应主题目录；**重要沉淀同时经 `jingbowiki-api` 上传 jingboWiki**（权威源，全员可检索），上传后按技能说明轮询 parse_status 确认生效
 
 ## 共享知识（取消隔离，个人上传即全员可用）
 

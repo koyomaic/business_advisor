@@ -23,10 +23,12 @@ curl -fsSL https://raw.githubusercontent.com/koyomaic/business_advisor/main/boot
   -o /tmp/provision.sh && bash /tmp/provision.sh install
 ```
 
-**GitHub 访问方式**：默认 HTTPS（`/root/.git-credentials` 存 PAT）；网络不稳的机器建议改 SSH——
-`ssh-keygen -t ed25519` 生成密钥 → 公钥登记到仓库 Settings → Deploy keys（**勾选 Allow write access**，部署需 push）→
-`/root/.ssh/config` 为 github.com 配 `StrictHostKeyChecking accept-new`（保证 systemd 非交互轮次可连）→
-`boot.env` 的 `REPO_URL` 与 `relay-dev` 的 git remote 改 `git@github.com:koyomaic/business_advisor.git`（i-ll733rsj 已启用）。
+**GitHub 访问方式**：机队默认 **SSH**（deploy key，每机一把）。新机 provision 自动补齐：生成 ed25519 密钥、
+固化 `/root/.ssh/config`（github.com `accept-new`，systemd 非交互轮次必需）、认证实测；首装按其 WARN 提示把
+本机公钥登记到仓库 Settings → Deploy keys（**勾选 Allow write access**，部署需 push），title 建议 `relay-<hostname>`。
+**HTTPS + PAT 为备用**（凭据 `/root/.git-credentials`）：SSH 故障时把 `boot.env` 的 `REPO_URL` 改为
+`https://github.com/koyomaic/business_advisor.git`（`relay-dev` 同步 `git remote set-url`），恢复后改回。
+已配 HTTPS 的存量机器不受影响（boot.env 每机一份，provision 不覆盖）。
 
 **旧机迁移（推荐先做）**：把旧机 `/mnt/vol-eltaah12/backup/relay-backup-*.tar.gz` 最新一份
 放到新机同路径，再跑上面命令 —— 清单会自动用备份补齐 workspace 缺失文件
@@ -41,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/koyomaic/business_advisor/main/boot
 5. 可选：本机私有检查写 `/opt/team/relay-boot/provision-local.sh`（可执行，参数=模式；
    适合放内网 MCP 连通性等不进 git 的检查，失败只 WARN；PG 连通性已是原生清单项）
 
-## 清单项目（32 项，PG 模式 33 项，顺序执行）
+## 清单项目（PG 模式 35 项 / SQLite 模式 34 项，顺序执行）
 
 | # | 项目 | 缺失时动作 | 级别 |
 |---|---|---|---|
@@ -66,6 +68,7 @@ curl -fsSL https://raw.githubusercontent.com/koyomaic/business_advisor/main/boot
 | 27 | 首装引导（无现役 release → boot.sh boot 完整部署） | 自动 | 硬 |
 | 28 | relay active+healthy | enable/start/restart | 硬 |
 | 29 | 两个 timer enabled | enable --now | 硬 |
+| 29b | GitHub 访问就绪：SSH（默认）→ config `accept-new` 固化、无密钥自动生成、认证实测；HTTPS（备用）→ 查 `/root/.git-credentials` | config/密钥自愈；认证失败 WARN 附公钥与 Deploy keys 登记指引 | 软 |
 | 30 | GitHub 远端可达且 remote==current | 仅报告 | 软 |
 | 31 | dws 种子登录态实测（contact user me） | 仅报告 | 软 |
 | 32 | provision-local.sh 本机附加检查 | 执行 hook | 软 |

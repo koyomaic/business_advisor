@@ -29,7 +29,7 @@ MODE="${1:-install}"
 BOOT_DIR=/opt/team/relay-boot
 # shellcheck source=/dev/null
 [ -f "$BOOT_DIR/boot.env" ] && source "$BOOT_DIR/boot.env"
-REPO_URL="${REPO_URL:-https://github.com/koyomaic/business_advisor.git}"
+REPO_URL="${REPO_URL:-git@github.com:koyomaic/business_advisor.git}"  # 机队默认 SSH（deploy key）；HTTPS+PAT 备用见 boot.env.example
 BRANCH="${BRANCH:-main}"
 RELEASE_ROOT="${RELEASE_ROOT:-/opt/team/relay-deploy/releases}"
 CURRENT_LINK="${CURRENT_LINK:-/opt/team/relay-deploy/current}"
@@ -207,6 +207,7 @@ elif heal; then
   miss "生成机队标准布局"
   cat > "$BOOT_DIR/boot.env" <<EOF
 # provision.sh 生成于 $(date '+%F %T')：机队标准布局；ALERT_TO 等按需修改
+# REPO_URL 默认 SSH（deploy key，公钥登记见 INSTALL.md）；HTTPS+PAT 备用：https://github.com/koyomaic/business_advisor.git
 REPO_URL=$REPO_URL
 BRANCH=$BRANCH
 RELEASE_ROOT=$RELEASE_ROOT
@@ -486,6 +487,32 @@ if systemctl is-enabled --quiet relay-boot.timer 2>/dev/null && systemctl is-act
   ok "boot(01:00)+backup(03:30) enabled+active"
 elif heal; then abort "timer 无法启用/激活"
 else bad "timer 未启用或 failed（install 模式自动拉起）"; fi
+
+# ---------- 27b GitHub 访问就绪（机队默认 SSH deploy key；HTTPS+PAT 备用） ----------
+step "GitHub访问"
+case "$REPO_URL" in
+git@*|ssh://*)
+  SSH_NOTE=""
+  if [ -f /root/.ssh/config ] && grep -q "accept-new" /root/.ssh/config; then :
+  elif heal; then
+    mkdir -p /root/.ssh && chmod 700 /root/.ssh
+    printf '\nHost github.com\n    User git\n    IdentityFile ~/.ssh/id_ed25519\n    StrictHostKeyChecking accept-new\n    ServerAliveInterval 30\n    ServerAliveCountMax 4\n' >> /root/.ssh/config
+    chmod 600 /root/.ssh/config && SSH_NOTE="config已固化; "
+  else SSH_NOTE="config缺accept-new段(install自动固化); "; fi
+  if [ -f /root/.ssh/id_ed25519 ] || [ -f /root/.ssh/id_rsa ]; then :
+  elif heal; then
+    ssh-keygen -t ed25519 -C "relay-$(hostname)" -f /root/.ssh/id_ed25519 -N "" -q && chmod 600 /root/.ssh/id_ed25519 && SSH_NOTE="${SSH_NOTE}已生成新密钥(待登记); "
+  else SSH_NOTE="${SSH_NOTE}无密钥(install自动生成); "; fi
+  SSH_OUT="$(timeout 20 ssh -o BatchMode=yes -T git@github.com 2>&1)"  # 认证成功 github 也 exit 1，不能用管道+pipefail 判定
+  case "$SSH_OUT" in
+  *"successfully authenticated"*) ok "SSH ${SSH_NOTE}认证 OK" ;;
+  *) warn "SSH ${SSH_NOTE}认证失败——把公钥登记到仓库 Settings→Deploy keys（勾选 Allow write access）：$(cat /root/.ssh/id_ed25519.pub 2>/dev/null || echo '(无公钥)')" ;;
+  esac
+  ;;
+*)
+  [ -s /root/.git-credentials ] && ok "HTTPS+PAT（备用模式）" || warn "HTTPS 模式但 /root/.git-credentials 缺失（拉取/推送会失败）"
+  ;;
+esac
 
 # ---------- 28 GitHub 远端（SOFT） ----------
 step "GitHub远端"

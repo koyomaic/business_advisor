@@ -350,26 +350,36 @@ if [ -f "$WORKSPACE/AGENTS.md" ]; then ok
 elif heal && [ -f "$RES_ROOT/boot/workspace-AGENTS.md" ] && cp "$RES_ROOT/boot/workspace-AGENTS.md" "$WORKSPACE/AGENTS.md"; then ok "已从仓库模板安装"
 else warn "缺失且无模板"; fi
 
-# ---------- 21b 基础技能（人为标记入库到仓库 skills/ 的机队共享技能；git 为真源 → workspace/shared/skills/） ----------
-# 只有仓库 skills/ 里存在的技能才检查/同步（入库即标记）；shared/skills 下其余本地/实验技能不碰。
-# 逐文件比对，漂移/缺失 → 本地旧版备份 *.bak-provision-* 后同步仓库版。
+# ---------- 21b 基础技能（人为标记入库到仓库 skills/ 的机队共享技能；git 为真源） ----------
+# 只有仓库 skills/ 里存在的技能才检查/同步（入库即标记）；各安装位下其余本地/实验技能不碰。
+# 安装位：技能目录内 .dest 文件（单行绝对路径）指定目标父目录；无 .dest → 默认 $WORKSPACE/shared/skills。
+#   例：钉钉套件 .dest=/root/.agents/skills，dws .dest=/opt/team/skills。
+# 逐文件比对（.dest 为元数据，不参与比对/下发），漂移/缺失 → 本地旧版备份 *.bak-provision-* 后同步仓库版。
 step "基础技能(git)"
-SK_DST="$WORKSPACE/shared/skills"
+SK_DST_DEFAULT="$WORKSPACE/shared/skills"
 if ! ls -d "$RES_ROOT"/skills/*/ >/dev/null 2>&1; then
   warn "仓库无基础技能（skills/ 为空），跳过"
 else
   SK_MISS=""; SK_DRIFT=""; SK_N=0
-  sk_drift_files() { # $1=repo技能目录 $2=目标技能目录；输出缺失/漂移的相对文件列表
+  sk_dest() { # $1=repo技能目录；输出该技能的目标父目录（读 .dest，缺省默认）
+    if [ -f "$1/.dest" ]; then
+      local d; d="$(head -1 "$1/.dest" | tr -d '[:space:]')"
+      [ -n "$d" ] && { printf '%s\n' "$d"; return; }
+    fi
+    printf '%s\n' "$SK_DST_DEFAULT"
+  }
+  sk_drift_files() { # $1=repo技能目录 $2=目标技能目录；输出缺失/漂移的相对文件列表（排除 .dest）
     local f rel
     while IFS= read -r f; do
       rel="${f#"$1"}"
+      [ "$rel" = ".dest" ] && continue
       cmp -s "$f" "$2/$rel" || printf '%s\n' "$rel"
     done < <(find "$1" -type f)
   }
   for src in "$RES_ROOT"/skills/*/; do
-    name="$(basename "$src")"; SK_N=$((SK_N+1))
-    if [ ! -d "$SK_DST/$name" ]; then SK_MISS="$SK_MISS $name"; continue; fi
-    d="$(sk_drift_files "$src" "$SK_DST/$name")"
+    name="$(basename "$src")"; SK_N=$((SK_N+1)); dst="$(sk_dest "$src")"
+    if [ ! -d "$dst/$name" ]; then SK_MISS="$SK_MISS $name"; continue; fi
+    d="$(sk_drift_files "$src" "$dst/$name")"
     [ -n "$d" ] && SK_DRIFT="$SK_DRIFT $name($(echo "$d" | tr '\n' ' '))"
   done
   if [ -z "$SK_MISS$SK_DRIFT" ]; then ok "$SK_N 个基础技能与仓库一致"
@@ -378,17 +388,31 @@ else
     miss "同步${SK_MISS}${SK_DRIFT}"
     stamp="$(date +%Y%m%d-%H%M)"; n_sync=0
     for src in "$RES_ROOT"/skills/*/; do
-      name="$(basename "$src")"; mkdir -p "$SK_DST/$name"
+      name="$(basename "$src")"; dst="$(sk_dest "$src")"; mkdir -p "$dst/$name"
       while IFS= read -r rel; do
         [ -n "$rel" ] || continue
-        [ -f "$SK_DST/$name/$rel" ] && cp "$SK_DST/$name/$rel" "$SK_DST/$name/$rel.bak-provision-$stamp"
-        mkdir -p "$(dirname "$SK_DST/$name/$rel")"
-        cp "$src/$rel" "$SK_DST/$name/$rel" || abort "技能 $name/$rel 同步失败"
+        [ -f "$dst/$name/$rel" ] && cp "$dst/$name/$rel" "$dst/$name/$rel.bak-provision-$stamp"
+        mkdir -p "$(dirname "$dst/$name/$rel")"
+        cp "$src/$rel" "$dst/$name/$rel" || abort "技能 $name/$rel 同步失败"
         n_sync=$((n_sync+1))
-      done < <(sk_drift_files "$src" "$SK_DST/$name")
+      done < <(sk_drift_files "$src" "$dst/$name")
     done
     ok "$SK_N 个技能，同步 $n_sync 文件（本地旧版备份 *.bak-provision-$stamp）"
   fi
+fi
+
+# ---------- 21c opencode 全局语境（~/.config/opencode/AGENTS.md，模板 git 为真源；所有 opencode 会话默认加载） ----------
+step "opencode全局语境"
+OC_GLOBAL="/root/.config/opencode/AGENTS.md"
+OC_TMPL="$RES_ROOT/boot/opencode-global-AGENTS.md"
+if [ ! -f "$OC_TMPL" ]; then warn "仓库无模板 boot/opencode-global-AGENTS.md，跳过"
+elif [ -f "$OC_GLOBAL" ] && cmp -s "$OC_TMPL" "$OC_GLOBAL"; then ok
+elif ! heal; then warn "缺失或与模板漂移（install 模式自动同步）"
+else
+  miss "同步"
+  mkdir -p "$(dirname "$OC_GLOBAL")"
+  [ -f "$OC_GLOBAL" ] && cp "$OC_GLOBAL" "$OC_GLOBAL.bak-provision-$(date +%Y%m%d-%H%M)"
+  if cp "$OC_TMPL" "$OC_GLOBAL"; then ok "已安装/同步（旧版备份 *.bak-provision-*）"; else warn "同步失败"; fi
 fi
 
 # ---------- 22 workspace opencode.json（内网 MCP，SOFT） ----------

@@ -1,0 +1,5 @@
+{
+  "skill_dir": "/mnt/vol-eltaah12/workspace/shared/skills/dingtalk-toolbar",
+  "toolbar_py": "/mnt/vol-eltaah12/workspace/shared/skills/dingtalk-toolbar/toolbar.py",
+  "python": "/usr/bin/python3"
+}

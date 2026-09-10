@@ -1,0 +1,12 @@
+{
+  "lastSyncAt": null,
+  "totalProcessed": 0,
+  "groups": {
+    "cid0/xxxxxxxxxxxxxxxx==": {
+      "name": "示例群名(首次运行后由真实数据替换)",
+      "category": "[项目]",
+      "alias": "[项目] 示例备注",
+      "remarkedAt": "2026-01-01T00:00:00+08:00"
+    }
+  }
+}

@@ -12,6 +12,12 @@
 - `python3`
 - 常规 shell 工具（bash、curl 等）
 
+## GitHub 项目（"检查GitHub项目更新"即指它）
+
+- 仓库 `koyomaic/business_advisor`（main）＝中转服务 relay 唯一真源；本地 git 工作区 `/mnt/vol-eltaah12/finaagent/relay-dev`
+- 检查更新：`cd /mnt/vol-eltaah12/finaagent/relay-dev && git fetch origin && git log --oneline HEAD..origin/main`（无输出＝已最新；有输出＝汇报新提交后等指示）
+- 任务里默认只检查/汇报；pull、部署、push、重启服务需任务明确要求（部署走 `/opt/team/relay-boot/boot.sh`，机队文档 `relay-dev/boot/INSTALL.md`）
+
 ## 共享区约定（shared/）
 
 - `shared/` 是团队共享区，**不要静默覆盖他人文件**；改动已有共享文件前先保留原版本
@@ -21,7 +27,7 @@
 
 ## 共享知识（取消隔离，个人上传即全员可用）
 
-- `shared/skills/`：团队技能，已自动加载进你的技能列表，直接按技能名使用。其中**基础技能**（人为标记入库到 git 仓库 `skills/` 目录的，当前：jingbowiki-api）以 git 为真源：改动务必提交回仓库，否则夜间体检（provision）会以仓库版覆盖本机改动（旧版备份 `*.bak-provision-*`）；未入库的本地/实验技能不受此限
+- `shared/skills/`：团队技能，已自动加载进你的技能列表，直接按技能名使用。其中**基础技能**（人为标记入库到 git 仓库 `skills/` 目录的；当前：jingbowiki-api、钉钉套件 dingtalk-*（安装位 `/root/.agents/skills`）、dws（`/opt/team/skills`）及 shared 内 dingtalk-* 技能；安装位由技能内 `.dest` 文件指定，缺省 shared/skills）以 git 为真源：改动务必提交回仓库，否则夜间体检（provision）会以仓库版覆盖本机改动（旧版备份 `*.bak-provision-*`）；未入库的本地/实验技能不受此限
 - `shared/mcp/`：团队 MCP 工具服务器，已自动接入，把它们的工具当普通工具调用
 - `shared/memory/`：团队记忆，已自动并入本 AGENTS.md
 - 三类内容任何人上传后，下一个任务即全员生效，无需重启

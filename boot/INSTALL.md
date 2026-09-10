@@ -55,7 +55,8 @@ curl -fsSL https://raw.githubusercontent.com/koyomaic/business_advisor/main/boot
 | 21 | dws 登录态种子 | 提示拷贝/登录 | 软 |
 | 22 | opencode.jsonc | 落模板 → 提示填 apiKey | 软 |
 | 23-24 | workspace AGENTS.md / opencode.json | 仓库模板安装 / 提示拷贝 | 软 |
-| 24b | 基础技能：仅仓库 `skills/` 内人为标记入库的（机队共享，git 为真源），逐文件比对 `shared/skills/` 同名技能 | 缺失/漂移 → 本地旧版备份 `*.bak-provision-*` 后同步仓库版；未入库的本地/实验技能不碰 | 软 |
+| 24b | 基础技能：仅仓库 `skills/` 内人为标记入库的（机队共享，git 为真源），逐文件比对安装位同名技能（安装位由技能内 `.dest` 指定：钉钉套件→`/root/.agents/skills`、dws→`/opt/team/skills`，缺省 `shared/skills/`） | 缺失/漂移 → 本地旧版备份 `*.bak-provision-*` 后同步仓库版；未入库的本地/实验技能不碰 | 软 |
+| 24c | opencode 全局语境 `/root/.config/opencode/AGENTS.md`（模板 `boot/opencode-global-AGENTS.md`，git 为真源；所有会话默认加载 GitHub 项目指向等语境） | 缺失/漂移 → 备份后同步模板 | 软 |
 | 25-26 | claude-proxy / relay-tls-proxy | 缺则装（tls 仅证书存在时） | 软 |
 | 27 | 首装引导（无现役 release → boot.sh boot 完整部署） | 自动 | 硬 |
 | 28 | relay active+healthy | enable/start/restart | 硬 |
@@ -87,16 +88,29 @@ RELAY_DB=postgresql://USER:PASSWORD@HOST:5432/DBNAME   # 密码 URL 编码：@ �
 
 ## 基础技能（仓库 skills/，机队共享）
 
-`shared/skills/` 下的技能分两类：
+技能分两类：
 
 - **基础技能**：经人特别标记入库到仓库 `skills/` 目录的（入库即标记），机队共享、git 为真源。
   provision 清单 24b 逐文件比对并自愈：本机缺失/漂移 → 本地旧版备份 `*.bak-provision-*` 后同步仓库版。
 - **本地/实验技能**：未入库的，git 与 provision 均不碰，各机自由增改。
 
+**安装位（.dest）**：基础技能同步到哪个父目录，由技能目录内 `.dest` 文件（单行绝对路径）决定；
+无 `.dest` → 默认 `$WORKSPACE/shared/skills`。`.dest` 是元数据，不下发到目标、不参与比对。
+
+- 钉钉套件 `dingtalk-aisearch/aitable/calendar/chat/contact/doc/drive/event/mail/minutes/misc/shared/todo/wiki` → `/root/.agents/skills`
+- `dws` → `/opt/team/skills`
+- `jingbowiki-api`、`dingtalk-chat-digest`、`dingtalk-group-remark`、`dingtalk-send`、`dingtalk-toolbar` → 默认 shared/skills
+
 标记新基础技能（管理员操作）：把技能目录拷入仓库 `skills/`（剔除 `*.bak*`、zip、`__pycache__`、运行时状态文件；
-**严禁入库任何密钥**，凭据一律放 `shared/secrets/`）→ commit + push；各机夜间轮次自动同步。
+**严禁入库任何密钥**，凭据一律放 `shared/secrets/`）→ 非默认安装位则加 `.dest` 文件 → commit + push；各机夜间轮次自动同步。
 修改基础技能：改仓库（或改本机后提交回仓库）；只改本机不提交，夜间自愈会以仓库版覆盖（有备份）。
-当前基础技能：`jingbowiki-api`（jingboWiki 知识库接口，共享知识优先权威源）。
+
+## opencode 全局语境（~/.config/opencode/AGENTS.md）
+
+机队每台机的 `/root/.config/opencode/AGENTS.md` 由模板 `boot/opencode-global-AGENTS.md` 安装（provision 清单 24c，git 为真源），
+所有 opencode 会话（任意工作目录）启动即默认加载：GitHub 项目指向（"检查GitHub项目更新"＝business_advisor/relay-dev）、
+部署/门禁/健康检查入口、关键路径、知识源优先级、铁律。改语境＝改模板提交，夜间轮次自动同步（旧版备份 `*.bak-provision-*`）。
+已运行的会话需重启 opencode 才生效。
 
 ## 两种模式
 

@@ -23,6 +23,11 @@ curl -fsSL https://raw.githubusercontent.com/koyomaic/business_advisor/main/boot
   -o /tmp/provision.sh && bash /tmp/provision.sh install
 ```
 
+**GitHub 访问方式**：默认 HTTPS（`/root/.git-credentials` 存 PAT）；网络不稳的机器建议改 SSH——
+`ssh-keygen -t ed25519` 生成密钥 → 公钥登记到仓库 Settings → Deploy keys（**勾选 Allow write access**，部署需 push）→
+`/root/.ssh/config` 为 github.com 配 `StrictHostKeyChecking accept-new`（保证 systemd 非交互轮次可连）→
+`boot.env` 的 `REPO_URL` 与 `relay-dev` 的 git remote 改 `git@github.com:koyomaic/business_advisor.git`（i-ll733rsj 已启用）。
+
 **旧机迁移（推荐先做）**：把旧机 `/mnt/vol-eltaah12/backup/relay-backup-*.tar.gz` 最新一份
 放到新机同路径，再跑上面命令 —— 清单会自动用备份补齐 workspace 缺失文件
 （relay.db 成员 token、relay.env 密钥、shared/ 技能与 dws 种子；`--keep-old-files` 绝不覆盖已有）。

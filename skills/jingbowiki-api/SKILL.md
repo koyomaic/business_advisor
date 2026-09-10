@@ -30,6 +30,14 @@ description: 查询、调用和维护 jingboWiki 18082 端口的 HTTP 接口，�
 
 连接检查采用健康检查及任务相关的读取接口；用户仅要求检查连接时，不通过上传、建库或删除来测试。用户已要求的写操作按其范围执行。
 
+## 建库默认
+
+- **默认创建纯 Wiki 知识库**：`indexing_strategy` 仅 `wiki_enabled=true`（vector/keyword/graph 全关），其余配置按 [纯 Wiki 操作流程](references/pure-wiki.md) 的建库请求体；用户明确要 RAG/向量/关键词类时才按对应类型建。
+- **默认模型取本地环境默认模型**：用户未指定模型时，读本地 opencode 配置 `~/.config/opencode/opencode.jsonc`（或 `.json`）：顶层 `model` 字段（形如 `provider/模型名`）+ 对应 `provider.<provider>.options.baseURL` / `apiKey`（OpenAI 兼容接口）；模型名取 `/` 后的部分（端点上的 model id）。
+- 绑定前先 `GET /models` 查同名模型；未注册则先 `POST /models`（type=`KnowledgeQA`，source=`remote`，provider=`generic`，parameters: `base_url`/`api_key`），再用 `POST /initialization/remote/check` 验证 jingboWiki 侧出网连通。
+- apiKey 仅用于注册与调用，不输出到对话、不写入文档。
+- 用户明确指定（模型 / 知识库类型 / 空间）时以指定为准，默认只兜底。
+
 ## 文档维护
 
 输出以 jingboWiki 命名，只写接口路径、必要的认证、参数和请求响应。保留前三项顺序：上传知识库文件、查询知识库、快速检索；其他接口放在之后。不要加入 MCP、上游品牌、来源追溯或过程性说明。

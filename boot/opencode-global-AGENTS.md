@@ -29,6 +29,12 @@
 2. 本地 `shared/knowledge/` 兜底；冲突以 jingboWiki 为准
 3. 归档进 `shared/knowledge/` 的知识文件必须同任务上传 jingboWiki（受理即成功、不阻塞等解析）
 
+## 钉钉消息样式（默认约定）
+
+- 日常汇报/通知一律用 **Markdown**（`dws chat +dm --content` 即支持），不发纯文本
+- 正式通知（部署预警、重要公告、对领导汇报）用 **流式卡片**（`dws chat +messages-send-card`，完成态 flow-status=3）
+- 用户明确指定样式时以指定为准
+
 ## 铁律
 
 - 绝不给马韵升发任何钉钉消息（userId=1）

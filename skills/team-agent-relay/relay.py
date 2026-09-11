@@ -23,9 +23,10 @@
 配置: 环境变量 TEAM_AGENT_SERVER/TEAM_AGENT_TOKEN/TEAM_AGENT_PROFILE 优先，
 其次 ~/.team-agent/config（INI 多节，每节一组 SERVER=/TOKEN=，节名即 profile；
 旧版无节平铺格式首次加载自动迁移为 [default] 并回写）。
-连接: 默认 https://10.189.51.29:8788，TLS 校验固定用本目录 ca.pem
-（CA 缺失时退回系统默认校验）；旧 http://10.189.51.29:8787 配置
-首次加载时自动迁移为 https 默认并回写。
+连接: 默认 https://10.189.51.23:8788（中鲁），TLS 校验固定用本目录 ca.pem
+（CA 缺失时退回系统默认校验）；历史默认地址（.23:8787 http、.29:8787 http）
+首次加载时按 SERVER_MIGRATIONS 自动迁移并回写。.29 为新能源中转，
+新能源成员用 --profile 新能源 --server https://10.189.51.29:8788 配置。
 """
 from __future__ import annotations
 
@@ -41,13 +42,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 CFG_PATH = os.path.expanduser("~/.team-agent/config")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CA_PEM = os.path.join(SCRIPT_DIR, "ca.pem")
-OLD_DEFAULT_SERVER = "http://10.189.51.29:8787"
-DEFAULT_SERVER = "https://10.189.51.29:8788"
+DEFAULT_SERVER = "https://10.189.51.23:8788"   # 中鲁（本团队默认）
+# 历史默认地址 → 现地址（首载自动迁移回写；.29=新能源只做 http→https 原地升级，不跨机迁移）
+SERVER_MIGRATIONS = {
+    "http://10.189.51.23:8787": DEFAULT_SERVER,
+    "http://10.189.51.29:8787": "https://10.189.51.29:8788",
+}
 TERMINAL = {"done", "review", "conflict", "failed", "cancelled"}
 MAX_FILE_BYTES = 1 * 1024 * 1024  # 文件通道单文件上限 1MB
 
@@ -99,8 +104,7 @@ def _read_ini() -> configparser.ConfigParser:
         cp.add_section("default")
         server = flat.get("SERVER", "")
         if server:
-            cp.set("default", "SERVER",
-                   DEFAULT_SERVER if server == OLD_DEFAULT_SERVER else server)
+            cp.set("default", "SERVER", SERVER_MIGRATIONS.get(server, server))
         if flat.get("TOKEN"):
             cp.set("default", "TOKEN", flat["TOKEN"])
         _write_ini(cp)
@@ -108,9 +112,10 @@ def _read_ini() -> configparser.ConfigParser:
     except configparser.Error:
         return _new_cp()
     changed = False
-    for name in cp.sections():  # 各节旧 http 地址统一迁移
-        if cp.get(name, "SERVER", fallback="") == OLD_DEFAULT_SERVER:
-            cp.set(name, "SERVER", DEFAULT_SERVER)
+    for name in cp.sections():  # 各节历史默认地址统一迁移
+        old = cp.get(name, "SERVER", fallback="")
+        if old in SERVER_MIGRATIONS:
+            cp.set(name, "SERVER", SERVER_MIGRATIONS[old])
             changed = True
     if changed:
         _write_ini(cp)
@@ -193,8 +198,7 @@ def cmd_config(args, cfg):
         server = (args.server
                   or cp.get(profile, "SERVER", fallback="")
                   or DEFAULT_SERVER)
-        if server == OLD_DEFAULT_SERVER:
-            server = DEFAULT_SERVER
+        server = SERVER_MIGRATIONS.get(server, server)
         cp.set(profile, "SERVER", server)
         cp.set(profile, "TOKEN", args.set_token)
         _write_ini(cp)

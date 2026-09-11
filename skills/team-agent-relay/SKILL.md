@@ -1,6 +1,6 @@
 ---
 name: team-agent-relay
-version: 1.1.0
+version: 1.2.0
 description: 团队远程执行中转服务。当用户要求"在团队服务器上跑个任务"、"写经营月报"、"查团队知识库"、"用钉钉发/查/收（dws）"、"让服务器上的 agent 处理"、"把文件传到/从服务器下载"等需要共享服务器环境、共享工具或团队知识库的任务时使用。能力：提交任务、实时直播进展、追加任务（续会话）、变更核查、文件上传/下载（≤1MB）、取消。支持多公司 profile 并存。
 ---
 
@@ -18,8 +18,9 @@ description: 团队远程执行中转服务。当用户要求"在团队服务器
 
 ## 连接
 
-- 默认 `https://10.189.51.29:8788`，TLS 校验固定用本目录 `ca.pem`（随包分发，缺失时退回系统默认校验）
-- 旧版 http:8787 配置首次加载自动迁移为 https 并回写，无需手工改
+- 默认 `https://10.189.51.23:8788`（**中鲁**中转，本团队），TLS 校验固定用本目录 `ca.pem`（随包分发，缺失时退回系统默认校验）
+- **新能源**中转为 `https://10.189.51.29:8788`：新能源成员配置 `S config <token> --server https://10.189.51.29:8788 --profile 新能源`，之后命令带 `--profile 新能源`
+- 历史默认地址（.23:8787 http、.29:8787 http）首次加载自动迁移为对应 https 并回写，无需手工改
 - 指向其它主机：`S config <token> --server <url>`
 - **多公司并存**：配置为 INI 多节（`~/.team-agent/config`），每家公司一个 profile；所有命令支持 `--profile <名称>`（缺省 `default`，env `TEAM_AGENT_PROFILE`）。旧版单组平铺配置首次加载自动迁移为 `[default]`
 
@@ -69,7 +70,7 @@ token 只接受用户本人提供，绝不猜测/复用示例值；token 不落�
 - `--urgent`：插队（默认 FIFO，并发上限 3）
 - `--resume N`：追加要求，续接任务 N 的会话（不满意时用这个，别重开）
 - 输出带 `"error": true, "http": 409`：targets 与在途任务重叠 → 把 overlaps（谁/哪个任务/哪些目录）告知用户，确认继续再加 `--force`
-- `"http": 401`：token 失效 → 请用户找管理员重发，然后 `S config <新token> --profile <对应profile>`
+- `"http": 401`：token 失效**或连错公司服务器**（token 只在签发它的服务器有效）→ 先 `S version` 看连的是哪台（.23=中鲁 / .29=新能源），连错则 `S config <token> --profile <对应profile>` 重配；确实失效则请用户找管理员重发
 
 **文件上传/下载**：
 - 路径是共享区 `shared/` 内的相对路径（如 `data/9月.xlsx`、`reports/9月/月报.md`）

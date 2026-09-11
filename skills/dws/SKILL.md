@@ -5,7 +5,7 @@ description: 钉钉工作套件（dws CLI）。当任务涉及钉钉发消息/�
 
 # dws 钉钉工作套件
 
-`dws` 装在 `/usr/bin/dws`，登录身份为 **中鲁经营利润运营大脑**（京博控股集团，user_id 37505774）。命令形如 `dws <服务> <子命令> [flags]`，`+` 开头的是封装好的快捷命令（自动解析姓名→userId），不带 `+` 的是原子命令。
+`dws` 装在 `/usr/bin/dws`，登录身份以本机 `dws auth status` 为准（机队各机为京博控股集团大脑账号：.23 现为 **KG经营助理**/907021519，通讯录昵称"白露"；.29 现为 **新能源经营利润运营大脑**/98427540）。命令形如 `dws <服务> <子命令> [flags]`，`+` 开头的是封装好的快捷命令（自动解析姓名→userId），不带 `+` 的是原子命令。
 
 ## 认证
 
@@ -21,7 +21,7 @@ dws auth status
 实测输出形态：
 
 ```json
-{ "success": true, "authenticated": true, "token_valid": true, "corp_name": "京博控股集团", "user_id": "37505774", "user_name": "中鲁经营利润运营大脑" }
+{ "success": true, "authenticated": true, "token_valid": true, "corp_name": "京博控股集团", "user_id": "907021519", "user_name": "KG经营助理" }
 ```
 
 ## 高频命令速查
@@ -56,7 +56,7 @@ dws contact user search --query 王洪彬
 
 ```bash
 dws contact +me
-# → {"data":{"dept":"ZLRN高管层","name":"中鲁经营利润运营大脑","org":"京博控股集团","userId":"37505774",...},"ok":true}
+# → {"data":{"dept":"AI助理","name":"白露","org":"京博控股集团","userId":"907021519",...},"ok":true}
 ```
 
 ```bash

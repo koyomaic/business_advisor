@@ -17,7 +17,9 @@
   python3 relay.py cancel <id>
   python3 relay.py confirm <id> [--outcome done|conflict]
 
-所有子命令支持 --profile <名称> 选择公司/服务器配置（缺省 default）。
+所有子命令支持 --profile <名称> 选择公司/服务器配置
+（缺省顺序: --profile > env TEAM_AGENT_PROFILE > 打包大脑名 PACKAGE_BRAIN > default）。
+成员包由所在中转服务器 pack.sh 生成，包名 team-agent-relay-<dws认证大脑名>。
 
 输出均为单行 JSON。退出码: 0 正常; 2 目标重叠(409); 3 token失效(401)。
 配置: 环境变量 TEAM_AGENT_SERVER/TEAM_AGENT_TOKEN/TEAM_AGENT_PROFILE 优先，
@@ -42,12 +44,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
+
+# 打包时由 pack.sh 写入：本技能所代表的 dws 认证大脑名（同时作为缺省 profile 名）。
+# 源模板留空 → 缺省 profile 回落 "default"。
+PACKAGE_BRAIN = ""
 
 CFG_PATH = os.path.expanduser("~/.team-agent/config")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CA_PEM = os.path.join(SCRIPT_DIR, "ca.pem")
-DEFAULT_SERVER = "https://10.189.51.23:8788"   # 中鲁（本团队默认）
+DEFAULT_SERVER = "https://10.189.51.23:8788"   # 源模板默认；成员包由 pack.sh 写入所属大脑服务器
 # 历史默认地址 → 现地址（首载自动迁移回写；.29=新能源只做 http→https 原地升级，不跨机迁移）
 SERVER_MIGRATIONS = {
     "http://10.189.51.23:8787": DEFAULT_SERVER,
@@ -124,7 +130,7 @@ def _read_ini() -> configparser.ConfigParser:
 
 def load_cfg(profile: str = "") -> dict:
     profile = (profile or os.environ.get("TEAM_AGENT_PROFILE", "")
-               or "default")
+               or PACKAGE_BRAIN or "default")
     cfg = {
         "profile": profile,
         "server": os.environ.get("TEAM_AGENT_SERVER", ""),
@@ -237,7 +243,7 @@ def _ver_tuple(v: str):
 def cmd_version(args, cfg):
     server = cfg["server"] or DEFAULT_SERVER
     result = {"client": __version__, "profile": cfg["profile"],
-              "server": None}
+              "brain": PACKAGE_BRAIN or None, "server": None}
     try:
         with urllib.request.urlopen(server.rstrip("/") + "/health",
                                     timeout=10,

@@ -94,7 +94,8 @@ def test_blocked_command_full_flow_fake_agent(relay_factory, tmp_path):
                             timeout=30)
     tid = submit(base, tok, "删除某个临时目录")["task_id"]
 
-    t = _wait_pending(base, tok, tid, timeout=30)
+    # 窗口放宽到 55s（< task_timeout 60s）：高负载下执行器拦截偶发延迟，30s 曾致门禁误报
+    t = _wait_pending(base, tok, tid, timeout=55)
     assert t["status"] == "pending_approval", t
     assert t["blocked_cmd"] == "rm -rf /root", t
     assert t["error"].startswith("blocked:"), t
@@ -125,7 +126,7 @@ def test_blocked_command_deny_fake_agent(relay_factory, tmp_path):
                             timeout=30)
     tid = submit(base, tok, "删除某个临时目录")["task_id"]
 
-    t = _wait_pending(base, tok, tid, timeout=30)
+    t = _wait_pending(base, tok, tid, timeout=55)  # 高负载余量，同 approve 用例
     assert t["status"] == "pending_approval", t
     assert t["blocked_cmd"]
     r2 = member_c.post(f"/tasks/{tid}/approve", json={"decision": "deny"})

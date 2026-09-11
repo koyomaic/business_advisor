@@ -73,7 +73,7 @@ if printf '%s' "$prompt" | grep -q "人工已批准"; then
   exit 0
 fi
 printf '%s\\n' '{"type":"tool_use","sessionID":"ses_fake","part":{"tool":"bash","title":"Bash","state":{"status":"completed","input":{"command":"rm -rf /root"}}}}'
-sleep 55
+sleep 20
 """
 
 
@@ -94,7 +94,8 @@ def test_blocked_command_full_flow_fake_agent(relay_factory, tmp_path):
                             timeout=30)
     tid = submit(base, tok, "删除某个临时目录")["task_id"]
 
-    # 窗口放宽到 55s（< task_timeout 60s）：高负载下执行器拦截偶发延迟，30s 曾致门禁误报
+    # 窗口 55s；fake agent 保活 20s——即使高负载下执行器循环被饿到 agent 退出后，
+    # 管道缓冲的 tool_use 行仍会被读到并转 pending_approval，消除窗口边界竞态
     t = _wait_pending(base, tok, tid, timeout=55)
     assert t["status"] == "pending_approval", t
     assert t["blocked_cmd"] == "rm -rf /root", t

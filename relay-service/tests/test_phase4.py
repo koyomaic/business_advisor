@@ -142,6 +142,46 @@ def test_blocked_command_deny_fake_agent(relay_factory, tmp_path):
     admin_c.close()
 
 
+# 假 agent：prompt 含「实际写入」时在共享区写一个文件（模拟违反只读声明），否则纯读回 done
+FAKE_WRITER = """#!/bin/sh
+prompt="$*"
+if printf '%s' "$prompt" | grep -q "实际写入"; then
+  mkdir -p ../../shared/knowledge
+  printf 'dirty\\n' > ../../shared/knowledge/dirty.txt
+fi
+printf '%s\\n' '{"type":"text","sessionID":"ses_w","part":{"type":"text","text":"done"}}'
+printf '%s\\n' '{"type":"step_finish","sessionID":"ses_w","part":{"tokens":{"total":5},"cost":0}}'
+exit 0
+"""
+
+
+def test_read_only_violation_and_clean(relay_factory, tmp_path):
+    script = tmp_path / "writer_agent.sh"
+    script.write_text(FAKE_WRITER)
+    script.chmod(0o755)
+    r = relay_factory(agent_bin=str(script), task_timeout=60)
+    base = r["base"]
+    admin_c = httpx.Client(base_url=base, headers={"Authorization": "Bearer admin-test"},
+                           timeout=30)
+    tok = admin_c.post("/users", json={"name": "reader"}).json()["token"]
+
+    # 描述带「只读」标记 → read_only 落库；实际却改了文件 → conflict + 违规说明（事后兜底）
+    tid = submit(base, tok, "只读核查（实际写入验证）：回复 done",
+                 targets=["shared/knowledge"])["task_id"]
+    t = wait_task(base, tok, tid, timeout=60)
+    assert t["read_only"] is True, t
+    assert t["status"] == "conflict", t
+    assert any("只读" in c["note"] for c in t["conflicts"]), t
+    assert "shared/knowledge/dirty.txt" in t["changed_files"], t
+
+    # 真纯读无改动 → 自动 done（基线已含 dirty.txt，无新增变更）
+    tid2 = submit(base, tok, "只读查询：回复 done", targets=["shared/knowledge"])["task_id"]
+    t2 = wait_task(base, tok, tid2, timeout=60)
+    assert t2["status"] == "done", t2
+    assert t2["read_only"] is True, t2
+    admin_c.close()
+
+
 @pytest.mark.integration
 def test_blocked_command_approve_flow(relay, member):
     tok = _tok(member)

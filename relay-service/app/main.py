@@ -335,6 +335,15 @@ refresh();setInterval(()=>{refresh();if(document.getElementById("view-tokens").s
 from .executor import Executor
 from .scheduler import Scheduler
 from .targets import find_conflicts
+
+# 纯读声明识别：显式 read_only 字段（客户端 ≥1.5.0）或描述带只读标记（存量客户端零改动）。
+# 事前防碰对纯读直接放行；事后扫描兜底——声明只读却改了文件 → conflict 人工核查。
+READ_ONLY_MARKERS = ("只读", "read-only", "read only", "readonly")
+
+
+def _declares_read_only(description: str) -> bool:
+    d = (description or "").lower()
+    return any(m in d for m in READ_ONLY_MARKERS)
 from .workspace import Workspace
 
 
@@ -361,6 +370,7 @@ class NewTask(BaseModel):
     targets: list[str] = Field(default_factory=list)
     priority: str = "normal"  # normal | urgent
     force: bool = False
+    read_only: bool = False  # 纯读声明：跳过事前防碰；事后若发现文件改动仍会置 conflict
     resume_from: int | None = None
 
 
@@ -549,6 +559,14 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         row = db.task(task_id)  # 刷新
         scan = ws.scan(row)
         conflicts = _check_conflicts(row, scan, finished)
+        if row.get("read_only") and scan["all"]:
+            conflicts.append({
+                "file": ", ".join(scan["all"][:5]),
+                "with_task": task_id,
+                "with_user": row["user"],
+                "backup": "",
+                "note": "任务声明只读（read_only）但产生了文件改动，请人工核查",
+            })
         if res.error == "cancelled":
             status, err = "cancelled", "cancelled by user"
         elif res.error:
@@ -797,14 +815,16 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="priority must be normal|urgent")
         if body.resume_from is not None and not db.task(body.resume_from):
             raise HTTPException(status_code=404, detail="resume_from task not found")
+        read_only = body.read_only or _declares_read_only(body.description)
         warnings = []
-        if body.targets:
+        if body.targets and not read_only:  # 纯读任务直接放行（事后扫描兜底）
             warnings = find_conflicts(body.targets, db.active_tasks())
             if warnings and not body.force:
                 raise HTTPException(status_code=409, detail={
                     "error": "targets overlap with in-flight tasks",
                     "overlaps": warnings,
-                    "hint": "确认无误后带 force=true 重新提交，或等待在途任务完成",
+                    "hint": "确认无误后带 force=true 重新提交，或等待在途任务完成；"
+                            "纯读任务在描述中注明「只读」即可直接放行",
                 })
         task_id = db.create_task(
             user=principal["name"],
@@ -813,6 +833,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             targets=body.targets,
             priority=body.priority,
             resume_from=body.resume_from,
+            read_only=read_only,
         )
         audit.line(task_id, principal["name"], "submit", body.description[:120])
         bus.publish(task_id, t="status", s="queued")

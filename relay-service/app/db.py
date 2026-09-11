@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS tasks(
   resume_from INTEGER,
   blocked_cmd TEXT NOT NULL DEFAULT '',
   resume_hint TEXT NOT NULL DEFAULT '',
+  read_only INTEGER NOT NULL DEFAULT 0,
   created_at REAL NOT NULL,
   started_at REAL,
   finished_at REAL
@@ -83,6 +84,7 @@ PG_SCHEMA = [
       resume_from BIGINT,
       blocked_cmd TEXT NOT NULL DEFAULT '',
       resume_hint TEXT NOT NULL DEFAULT '',
+      read_only BOOLEAN NOT NULL DEFAULT FALSE,
       created_at DOUBLE PRECISION NOT NULL,
       started_at DOUBLE PRECISION,
       finished_at DOUBLE PRECISION
@@ -94,7 +96,7 @@ PG_SCHEMA = [
 TASK_FIELDS = {
     "user", "description", "project", "targets", "priority", "status",
     "session_id", "workdir", "result", "error", "changed_files",
-    "conflicts", "tokens", "cost", "resume_from", "blocked_cmd", "resume_hint",
+    "conflicts", "tokens", "cost", "resume_from", "blocked_cmd", "resume_hint", "read_only",
     "started_at", "finished_at",
 }
 
@@ -110,6 +112,7 @@ def _row_to_task(row) -> dict:
             t[k] = json.loads(t[k])
         except (TypeError, ValueError):
             t[k] = []
+    t["read_only"] = bool(t.get("read_only"))
     return t
 
 
@@ -139,7 +142,8 @@ class DB:
                 self._conn.executescript(SCHEMA)
                 cols = {r[1] for r in self._conn.execute("PRAGMA table_info(tasks)")}
                 for name, decl in (("blocked_cmd", "TEXT NOT NULL DEFAULT ''"),
-                                   ("resume_hint", "TEXT NOT NULL DEFAULT ''")):
+                                   ("resume_hint", "TEXT NOT NULL DEFAULT ''"),
+                                   ("read_only", "INTEGER NOT NULL DEFAULT 0")):
                     if name not in cols:
                         self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
                 ucols = {r[1] for r in self._conn.execute("PRAGMA table_info(users)")}
@@ -165,7 +169,8 @@ class DB:
                             " WHERE table_schema='public' AND table_name='tasks'")
         cols = {r["column_name"] for r in rows}
         for name, decl in (("blocked_cmd", "TEXT NOT NULL DEFAULT ''"),
-                           ("resume_hint", "TEXT NOT NULL DEFAULT ''")):
+                           ("resume_hint", "TEXT NOT NULL DEFAULT ''"),
+                           ("read_only", "BOOLEAN NOT NULL DEFAULT FALSE")):
             if name not in cols:
                 self._run(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
         rows, _ = self._run("SELECT column_name FROM information_schema.columns"
@@ -299,17 +304,17 @@ class DB:
 
     def create_task(self, *, user: str, description: str, project: str = "",
                     targets: list[str] | None = None, priority: str = "normal",
-                    resume_from: int | None = None) -> int:
+                    resume_from: int | None = None, read_only: bool = False) -> int:
         args = (user, description, project, json.dumps(targets or [], ensure_ascii=False),
-                priority, resume_from, time.time())
+                priority, resume_from, read_only, time.time())
         if self._pg:
             row = self._q(
-                'INSERT INTO tasks("user", description, project, targets, priority, resume_from, created_at)'
-                " VALUES(?, ?, ?, ?, ?, ?, ?) RETURNING id", args, one=True)
+                'INSERT INTO tasks("user", description, project, targets, priority, resume_from, read_only, created_at)'
+                " VALUES(?, ?, ?, ?, ?, ?, ?, ?) RETURNING id", args, one=True)
             return row["id"]
         self._q(
-            'INSERT INTO tasks("user", description, project, targets, priority, resume_from, created_at)'
-            " VALUES(?, ?, ?, ?, ?, ?, ?)", args)
+            'INSERT INTO tasks("user", description, project, targets, priority, resume_from, read_only, created_at)'
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?)", args)
         rows, _ = self._run("SELECT last_insert_rowid() AS id")
         return rows[0]["id"]
 

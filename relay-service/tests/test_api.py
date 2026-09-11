@@ -174,4 +174,22 @@ def test_overlap_409_then_force(relay, member):
     assert r.status_code == 202
     assert r.json()["warnings"]
 
+    # 纯读（显式 read_only 字段，客户端 ≥1.5.0）→ 重叠也放行，无 warnings
+    r = member.post("/tasks", json={
+        "description": "只回复 ok，不要使用任何工具。",
+        "targets": ["shared/rep/9月"],
+        "read_only": True,
+    })
+    assert r.status_code == 202
+    assert not r.json()["warnings"]
+    assert member.get(f"/tasks/{r.json()['task_id']}").json()["read_only"] is True
+
+    # 纯读（描述带「只读」标记，存量 1.4.0 客户端零改动）→ 同样放行并落库
+    r = member.post("/tasks", json={
+        "description": "只读查询：只回复 ok，不要使用任何工具。",
+        "targets": ["shared/rep/9月"],
+    })
+    assert r.status_code == 202
+    assert member.get(f"/tasks/{r.json()['task_id']}").json()["read_only"] is True
+
     member.post(f"/tasks/{a['task_id']}/cancel")

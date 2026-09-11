@@ -69,6 +69,7 @@ class Settings:
     confirm_recipients: list[str] = field(default_factory=lambda: list(DEFAULT_CONFIRM_RECIPIENTS))
     relay_exclude_providers: list[str] = field(default_factory=list)  # 任务配置中剔除的 provider（本地专用模型不进任务环境）
     boot_cmd: str = "/opt/team/relay-boot/boot.sh"  # bootloader 入口（POST /admin/update 触发）
+    min_client_version: str = ""  # 要求的最低客户端版本（空=不校验；/health 透出，客户端软提醒）
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -95,4 +96,5 @@ class Settings:
             confirm_recipients=_confirm_recipients_from_env(),
             relay_exclude_providers=[p.strip() for p in os.environ.get("RELAY_EXCLUDE_PROVIDERS", "").split(",") if p.strip()],
             boot_cmd=os.environ.get("RELAY_BOOT_CMD", "/opt/team/relay-boot/boot.sh"),
+            min_client_version=os.environ.get("RELAY_MIN_CLIENT_VERSION", "").strip(),
         )

@@ -16,6 +16,14 @@ def test_health_open(relay):
     assert body["engine"] == "opencode"
     assert body["db"] == "sqlite"  # 测试环境用临时 SQLite；生产 PG 时返回 postgresql
     assert body["max_concurrent"] == 2
+    assert body["min_client_version"] is None  # 默认不启用客户端最低版本校验
+
+
+def test_health_min_client_version(relay_factory):
+    relay = relay_factory(min_client_version="1.1.0")
+    r = httpx.get(relay["base"] + "/health", timeout=5)
+    assert r.status_code == 200
+    assert r.json()["min_client_version"] == "1.1.0"
 
 
 def test_missing_token_401(relay):

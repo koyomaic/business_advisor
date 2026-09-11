@@ -1,6 +1,7 @@
 ---
 name: team-agent-relay
-description: 团队远程执行中转服务。当用户要求"在团队服务器上跑个任务"、"写经营月报"、"查团队知识库"、"用钉钉发/查/收（dws）"、"让服务器上的 agent 处理"、"把文件传到/从服务器下载"等需要共享服务器环境、共享工具或团队知识库的任务时使用。能力：提交任务、实时直播进展、追加任务（续会话）、变更核查、文件上传/下载（≤1MB）、取消。
+version: 1.1.0
+description: 团队远程执行中转服务。当用户要求"在团队服务器上跑个任务"、"写经营月报"、"查团队知识库"、"用钉钉发/查/收（dws）"、"让服务器上的 agent 处理"、"把文件传到/从服务器下载"等需要共享服务器环境、共享工具或团队知识库的任务时使用。能力：提交任务、实时直播进展、追加任务（续会话）、变更核查、文件上传/下载（≤1MB）、取消。支持多公司 profile 并存。
 ---
 
 # 团队中转服务
@@ -8,11 +9,19 @@ description: 团队远程执行中转服务。当用户要求"在团队服务器
 所有操作通过本 skill 目录下的 `relay.py`（纯标准库，`python3` 直接跑，输出单行 JSON）。
 下文记 `S="python3 <本skill目录>/relay.py"`。
 
+## 安装/更新语义
+
+- 本 skill 以 frontmatter `version` 为准做版本比较（`S version` 可查客户端/服务端版本对照）
+- 安装时目录已存在 ≠ 失败：比对已装 SKILL.md 的 version，**本地旧于新包则直接覆盖安装**（幂等；用户配置在 `~/.team-agent/`，不在 skill 目录内，覆盖不丢配置）
+- 版本相同则跳过；本地更新则提示用户确认是否降级
+- 服务端 /health 若返回 `min_client_version` 且高于本地版本，`S version` 会给出 `upgrade_needed: true`，此时应提示用户更新本技能
+
 ## 连接
 
 - 默认 `https://10.189.51.29:8788`，TLS 校验固定用本目录 `ca.pem`（随包分发，缺失时退回系统默认校验）
 - 旧版 http:8787 配置首次加载自动迁移为 https 并回写，无需手工改
 - 指向其它主机：`S config <token> --server <url>`
+- **多公司并存**：配置为 INI 多节（`~/.team-agent/config`），每家公司一个 profile；所有命令支持 `--profile <名称>`（缺省 `default`，env `TEAM_AGENT_PROFILE`）。旧版单组平铺配置首次加载自动迁移为 `[default]`
 
 ## 何时使用
 
@@ -35,6 +44,8 @@ description: 团队远程执行中转服务。当用户要求"在团队服务器
 
 token 只接受用户本人提供，绝不猜测/复用示例值；token 不落日志、不复述给用户。
 
+**多公司用户**：用户在多家公司任职、有多组 token 时，每家公司存一个命名 profile（如 `S config <tokenB> --server <urlB> --profile 公司B`），并存不互相覆盖；执行任务前问清用哪家（或用户已在话里指明），未指明且存在多 profile 时用 `S profiles` 列出让用户选，**不要默认猜**。仅一个 profile 时直接走 `default`，不提及 profile 概念。
+
 ## 命令
 
 | 场景 | 命令 |
@@ -49,13 +60,16 @@ token 只接受用户本人提供，绝不猜测/复用示例值；token 不落�
 | **从服务器下载文件**（产出/结果） | `S download data/report.md ./report.md`（本地路径可省，默认存文件名） |
 | 取消 | `S cancel 42` |
 | review 核查后确认 | `S confirm 42` |
+| 版本对照（客户端/服务端/是否需升级） | `S version` |
+| 列出全部公司配置 | `S profiles`（token 打码） |
 
 参数说明：
+- `--profile`：所有子命令通用，选择公司配置（缺省 `default`）
 - `-t`：要动哪些共享目录（防冲突依据，强烈建议填；多个逗号分隔）
 - `--urgent`：插队（默认 FIFO，并发上限 3）
 - `--resume N`：追加要求，续接任务 N 的会话（不满意时用这个，别重开）
 - 输出带 `"error": true, "http": 409`：targets 与在途任务重叠 → 把 overlaps（谁/哪个任务/哪些目录）告知用户，确认继续再加 `--force`
-- `"http": 401`：token 失效 → 请用户找管理员重发，然后 `S config <新token>`
+- `"http": 401`：token 失效 → 请用户找管理员重发，然后 `S config <新token> --profile <对应profile>`
 
 **文件上传/下载**：
 - 路径是共享区 `shared/` 内的相对路径（如 `data/9月.xlsx`、`reports/9月/月报.md`）

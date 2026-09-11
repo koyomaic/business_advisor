@@ -12,6 +12,16 @@ CREATE TABLE IF NOT EXISTS users(
   name TEXT NOT NULL UNIQUE,
   created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS devices(
+  device_id TEXT PRIMARY KEY,
+  user_name TEXT NOT NULL,
+  device_name TEXT NOT NULL DEFAULT '',
+  secret TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  last_seen REAL,
+  last_ip TEXT NOT NULL DEFAULT '',
+  revoked_at REAL
+);
 CREATE TABLE IF NOT EXISTS tasks(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   "user" TEXT NOT NULL,
@@ -43,6 +53,16 @@ PG_SCHEMA = [
       token TEXT PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
       created_at DOUBLE PRECISION NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS devices(
+      device_id TEXT PRIMARY KEY,
+      user_name TEXT NOT NULL,
+      device_name TEXT NOT NULL DEFAULT '',
+      secret TEXT NOT NULL,
+      created_at DOUBLE PRECISION NOT NULL,
+      last_seen DOUBLE PRECISION,
+      last_ip TEXT NOT NULL DEFAULT '',
+      revoked_at DOUBLE PRECISION
     )""",
     """CREATE TABLE IF NOT EXISTS tasks(
       id BIGSERIAL PRIMARY KEY,
@@ -122,6 +142,9 @@ class DB:
                                    ("resume_hint", "TEXT NOT NULL DEFAULT ''")):
                     if name not in cols:
                         self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
+                ucols = {r[1] for r in self._conn.execute("PRAGMA table_info(users)")}
+                if "consumed_at" not in ucols:  # token 核销时刻（一次性激活码语义）
+                    self._conn.execute("ALTER TABLE users ADD COLUMN consumed_at REAL")
                 self._conn.commit()
 
     # ---- 后端内部 ----
@@ -145,6 +168,11 @@ class DB:
                            ("resume_hint", "TEXT NOT NULL DEFAULT ''")):
             if name not in cols:
                 self._run(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
+        rows, _ = self._run("SELECT column_name FROM information_schema.columns"
+                            " WHERE table_schema='public' AND table_name='users'")
+        ucols = {r["column_name"] for r in rows}
+        if "consumed_at" not in ucols:  # token 核销时刻（一次性激活码语义）
+            self._run("ALTER TABLE users ADD COLUMN consumed_at DOUBLE PRECISION")
 
     def _pg_retriable(self, exc: Exception) -> bool:
         return isinstance(exc, (self._psycopg2.OperationalError,
@@ -209,10 +237,57 @@ class DB:
         return dict(row) if row else {}
 
     def delete_user(self, name: str) -> None:
+        self._q("DELETE FROM devices WHERE user_name = ?", (name,))
         self._q("DELETE FROM users WHERE name = ?", (name,))
 
     def list_users(self) -> list[dict]:
-        return [dict(r) for r in self._q("SELECT token, name, created_at FROM users ORDER BY name")]
+        return [dict(r) for r in self._q(
+            "SELECT token, name, created_at, consumed_at FROM users ORDER BY name")]
+
+    def consume_token(self, token: str) -> bool:
+        """原子核销 token（一次性激活码语义）。返回是否由本次调用核销。"""
+        _, rowcount = self._run(
+            "UPDATE users SET consumed_at=? WHERE token=? AND consumed_at IS NULL",
+            (time.time(), token))
+        return rowcount > 0
+
+    def reissue_token(self, name: str, token: str) -> None:
+        """给既有用户换发新 token（旧 token 即刻失效；已激活设备不受影响）。"""
+        self._q("UPDATE users SET token=?, consumed_at=NULL, created_at=? WHERE name=?",
+                (token, time.time(), name))
+
+    # ---- devices（token 激活后绑定的设备凭证） ----
+
+    def device_upsert(self, device_id: str, user_name: str, device_name: str,
+                      secret: str, ip: str) -> None:
+        now = time.time()
+        _, rowcount = self._run(
+            "UPDATE devices SET user_name=?, device_name=?, secret=?, last_ip=?,"
+            " last_seen=?, revoked_at=NULL WHERE device_id=?",
+            (user_name, device_name, secret, ip, now, device_id))
+        if rowcount == 0:
+            self._q("INSERT INTO devices(device_id, user_name, device_name, secret,"
+                    " created_at, last_seen, last_ip) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                    (device_id, user_name, device_name, secret, now, now, ip))
+
+    def device_get(self, device_id: str) -> dict:
+        row = self._q("SELECT * FROM devices WHERE device_id = ?", (device_id,), one=True)
+        return dict(row) if row else {}
+
+    def devices_by_user(self, name: str) -> list[dict]:
+        return [dict(r) for r in self._q(
+            "SELECT device_id, user_name, device_name, created_at, last_seen, last_ip,"
+            " revoked_at FROM devices WHERE user_name = ? ORDER BY created_at", (name,))]
+
+    def revoke_device(self, name: str, device_id: str) -> bool:
+        _, rowcount = self._run(
+            "UPDATE devices SET revoked_at=? WHERE device_id=? AND user_name=?"
+            " AND revoked_at IS NULL", (time.time(), device_id, name))
+        return rowcount > 0
+
+    def touch_device(self, device_id: str, ip: str) -> None:
+        self._q("UPDATE devices SET last_seen=?, last_ip=? WHERE device_id=?",
+                (time.time(), ip, device_id))
 
     # ---- tasks ----
 

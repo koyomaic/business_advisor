@@ -70,6 +70,8 @@ class Settings:
     relay_exclude_providers: list[str] = field(default_factory=list)  # 任务配置中剔除的 provider（本地专用模型不进任务环境）
     boot_cmd: str = "/opt/team/relay-boot/boot.sh"  # bootloader 入口（POST /admin/update 触发）
     min_client_version: str = ""  # 要求的最低客户端版本（空=不校验；/health 透出，客户端软提醒）
+    auth_legacy: bool = False     # 旧式 bearer token 认证（生产默认关：token 仅作一次性激活码；过渡需要时置 1）
+    sign_window: int = 900        # 设备签名时间窗（秒），防重放；放宽以容忍成员机器时钟漂移
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -97,4 +99,7 @@ class Settings:
             relay_exclude_providers=[p.strip() for p in os.environ.get("RELAY_EXCLUDE_PROVIDERS", "").split(",") if p.strip()],
             boot_cmd=os.environ.get("RELAY_BOOT_CMD", "/opt/team/relay-boot/boot.sh"),
             min_client_version=os.environ.get("RELAY_MIN_CLIENT_VERSION", "").strip(),
+            auth_legacy=os.environ.get("RELAY_AUTH_LEGACY", "0").strip().lower()
+            in ("1", "true", "on", "yes"),
+            sign_window=int(os.environ.get("RELAY_SIGN_WINDOW", "60")),
         )

@@ -39,6 +39,9 @@ def relay_factory(tmp_path):
     def make(**overrides) -> dict:
         ws = tmp_path / f"workspace-{len(servers)}"
         (ws / "shared" / "knowledge").mkdir(parents=True)
+        # 业务测试默认走 legacy bearer 通道以聚焦业务逻辑；生产默认 auth_legacy=False
+        # （硬切换，token 仅作一次性激活码），认证加固本身由 test_auth.py 专项覆盖两种模式。
+        overrides.setdefault("auth_legacy", True)
         cfg = Settings(
             db_path=str(ws / "relay.db"),
             workspace_root=str(ws),

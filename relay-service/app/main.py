@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -363,6 +364,12 @@ class NewUser(BaseModel):
     name: str
 
 
+class ActivateBody(BaseModel):
+    token: str                 # 一次性激活码（即管理员发放的 ta_ token）
+    device_id: str = ""        # 客户端生成的设备标识（缺省服务端代生成）
+    device_name: str = ""      # 设备名（主机名等，仅展示/审计用）
+
+
 class ConfirmBody(BaseModel):
     outcome: str = "done"  # done | conflict
 
@@ -633,15 +640,65 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="team-agent relay", lifespan=lifespan)
 
-    def auth(authorization: str = Header(default="")) -> dict:
+    # 设备签名认证：nonce 缓存（防时间窗内重放）与旧式 bearer 计数（P3 关闭 legacy 的依据）
+    _seen_nonces: dict[tuple[str, str], float] = {}   # (device_id, nonce) → 过期时刻
+    _legacy_auths: dict[str, int] = {}                # user → 旧式认证次数
+
+    def _prune_nonces(now: float) -> None:
+        for k in [k for k, exp in _seen_nonces.items() if exp < now]:
+            _seen_nonces.pop(k, None)
+
+    async def _device_auth(request: Request, dev_id: str, ts_s: str,
+                           nonce: str, sig: str) -> dict:
+        now = time.time()
+        try:
+            ts = float(ts_s)
+        except ValueError:
+            raise HTTPException(status_code=401, detail="bad timestamp")
+        if abs(now - ts) > cfg.sign_window:
+            raise HTTPException(status_code=401, detail="timestamp outside window")
+        dev = db.device_get(dev_id)
+        if not dev or dev.get("revoked_at"):
+            raise HTTPException(status_code=401, detail="unknown or revoked device")
+        body = await request.body()
+        path = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+        digest = hashlib.sha256(body).hexdigest()
+        msg = f"{ts_s}\n{request.method}\n{path}\n{digest}\n{nonce}"
+        want = hmac.new(dev["secret"].encode(), msg.encode(), hashlib.sha256).hexdigest()
+        ip = request.client.host if request.client else ""
+        if not hmac.compare_digest(want, sig):
+            audit.line(0, dev["user_name"], "auth_sig_fail", f"device={dev_id} ip={ip}")
+            raise HTTPException(status_code=401, detail="bad signature")
+        _prune_nonces(now)
+        key = (dev_id, nonce)
+        if key in _seen_nonces:
+            audit.line(0, dev["user_name"], "auth_replay", f"device={dev_id} ip={ip}")
+            raise HTTPException(status_code=401, detail="replayed request")
+        _seen_nonces[key] = now + cfg.sign_window * 2
+        if not dev.get("last_seen") or now - dev["last_seen"] > 60:
+            db.touch_device(dev_id, ip)  # 限频回写，避免每请求一 UPDATE
+        return {"name": dev["user_name"], "admin": False, "device": dev_id}
+
+    async def auth(request: Request, authorization: str = Header(default="")) -> dict:
+        dev_id = request.headers.get("x-device-id", "")
+        sig = request.headers.get("x-signature", "")
+        ts_s = request.headers.get("x-timestamp", "")
+        nonce = request.headers.get("x-nonce", "")
+        if dev_id and sig and ts_s and nonce:
+            return await _device_auth(request, dev_id, ts_s, nonce, sig)
         tok = authorization.strip()
         if tok.lower().startswith("bearer "):
             tok = tok[7:].strip()
         if tok and tok == cfg.admin_token:
             return {"name": "__admin__", "admin": True}
-        u = db.user_by_token(tok)
-        if not u:
+        if not cfg.auth_legacy:
+            raise HTTPException(status_code=401,
+                                detail="bearer token auth disabled; activate a device first"
+                                       " (POST /auth/activate)")
+        u = db.user_by_token(tok) if tok else {}
+        if not u or u.get("consumed_at"):
             raise HTTPException(status_code=401, detail="invalid or missing token")
+        _legacy_auths[u["name"]] = _legacy_auths.get(u["name"], 0) + 1
         return {"name": u["name"], "admin": False}
 
     def require_admin(principal: dict = Depends(auth)) -> None:
@@ -661,6 +718,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             "queued": sched.pending if sched else 0,
             "max_concurrent": cfg.max_concurrent,
             "min_client_version": cfg.min_client_version or None,
+            "auth_legacy": cfg.auth_legacy,
         }
 
     @app.get("/users")
@@ -681,6 +739,51 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="user not found")
         db.delete_user(name)
         return {"ok": True, "name": name}
+
+    # ---- 设备激活与管理（token=一次性激活码，激活后换设备凭证签名认证） ----
+
+    @app.post("/auth/activate")
+    async def activate_device(body: ActivateBody, request: Request):
+        tok = body.token.strip()
+        u = db.user_by_token(tok)
+        ip = request.client.host if request.client else ""
+        if not u:
+            audit.line(0, "__unknown__", "activate_fail", f"invalid token ip={ip}")
+            raise HTTPException(status_code=401, detail="invalid token")
+        if u.get("consumed_at") or not db.consume_token(tok):
+            audit.line(0, u["name"], "activate_fail", f"token consumed ip={ip}")
+            raise HTTPException(status_code=409,
+                                detail="token 已被激活使用（一次性）；请联系管理员补发")
+        dev_id = body.device_id.strip() or ("dev_" + secrets.token_urlsafe(12))
+        dev_name = body.device_name.strip()[:60]
+        secret = secrets.token_urlsafe(32)
+        db.device_upsert(dev_id, u["name"], dev_name, secret, ip)
+        audit.line(0, u["name"], "device_activate",
+                   f"device={dev_id} name={dev_name} ip={ip}")
+        return {"ok": True, "user": u["name"],
+                "device_id": dev_id, "device_secret": secret}
+
+    @app.post("/users/{name}/token", status_code=201)
+    async def reissue_user_token(name: str, _: None = Depends(require_admin)):
+        if not db.user_by_name(name):
+            raise HTTPException(status_code=404, detail="user not found")
+        token = "ta_" + secrets.token_urlsafe(24)
+        db.reissue_token(name, token)
+        audit.line(0, "__admin__", "token_reissue", name)
+        return {"name": name, "token": token,
+                "note": "一次性激活码，激活后失效；仅本次显示。已激活设备不受影响"}
+
+    @app.get("/users/{name}/devices")
+    async def list_user_devices(name: str, _: None = Depends(require_admin)):
+        return {"devices": db.devices_by_user(name)}
+
+    @app.delete("/users/{name}/devices/{device_id}")
+    async def revoke_user_device(name: str, device_id: str,
+                                 _: None = Depends(require_admin)):
+        if not db.revoke_device(name, device_id):
+            raise HTTPException(status_code=404, detail="device not found or already revoked")
+        audit.line(0, "__admin__", "device_revoke", f"{name}/{device_id}")
+        return {"ok": True, "name": name, "device_id": device_id}
 
     # ---- 任务 ----
 
@@ -1054,6 +1157,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
     async def admin_report(days: int = 7, _: None = Depends(require_admin)):
         rep = db.report(days)
         rep["audit_tail"] = audit.tail(10)
+        rep["legacy_auths"] = dict(_legacy_auths)  # 旧式 bearer 认证计数（归零后可关 RELAY_AUTH_LEGACY）
         return rep
 
     @app.post("/admin/update")
@@ -1214,11 +1318,10 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         if not db.user_by_name(name):
             raise HTTPException(status_code=404, detail="user not found")
         token = "ta_" + secrets.token_urlsafe(24)
-        db.delete_user(name)
-        db.create_user(name, token)
+        db.reissue_token(name, token)  # 保留已激活设备，仅换发激活码
         audit.line(0, "__dashboard__", "token_regenerate", name)
         return {"name": name, "token": token,
-                "note": "旧 token 立即失效；新 token 仅本次显示"}
+                "note": "旧激活码立即失效；已激活设备不受影响；新码仅本次显示"}
 
     @app.delete("/dashboard/tokens/{name}")
     async def dashboard_token_delete(name: str, request: Request):

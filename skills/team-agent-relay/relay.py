@@ -21,7 +21,10 @@
 （缺省顺序: --profile > env TEAM_AGENT_PROFILE > 打包大脑名 PACKAGE_BRAIN > default）。
 成员包由所在中转服务器 pack.sh 生成，包名 team-agent-relay-<dws认证大脑名>。
 
-输出均为单行 JSON。退出码: 0 正常; 2 目标重叠(409); 3 token失效(401)。
+输出均为单行 JSON。退出码: 0 正常; 2 目标重叠(409); 3 token失效/已激活(401/409)。
+认证: token 即一次性激活码——首次使用自动调 /auth/activate 核销 token、
+绑定本设备并换回 device_secret（此后请求用 HMAC-SHA256 签名，secret 永不上网络，
+±900s 时间窗+nonce 防重放）；旧服务端无激活端点时自动回落 bearer，不阻塞。
 配置: 环境变量 TEAM_AGENT_SERVER/TEAM_AGENT_TOKEN/TEAM_AGENT_PROFILE 优先，
 其次 ~/.team-agent/config（INI 多节，每节一组 SERVER=/TOKEN=，节名即 profile；
 旧版无节平铺格式首次加载自动迁移为 [default] 并回写）。
@@ -35,16 +38,20 @@ from __future__ import annotations
 import argparse
 import base64
 import configparser
+import hashlib
+import hmac
 import json
 import os
+import socket
 import ssl
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 # 打包时由 pack.sh 写入：本技能所代表的 dws 认证大脑名（同时作为缺省 profile 名）。
 # 源模板留空 → 缺省 profile 回落 "default"。
@@ -135,25 +142,98 @@ def load_cfg(profile: str = "") -> dict:
         "profile": profile,
         "server": os.environ.get("TEAM_AGENT_SERVER", ""),
         "token": os.environ.get("TEAM_AGENT_TOKEN", ""),
+        "device_id": os.environ.get("TEAM_AGENT_DEVICE_ID", ""),
+        "device_secret": os.environ.get("TEAM_AGENT_DEVICE_SECRET", ""),
     }
     cp = _read_ini()
     if cp.has_section(profile):
-        if not cfg["server"]:
-            cfg["server"] = cp.get(profile, "SERVER", fallback="")
-        if not cfg["token"]:
-            cfg["token"] = cp.get(profile, "TOKEN", fallback="")
+        for key in ("server", "token", "device_id", "device_secret"):
+            if not cfg[key]:
+                cfg[key] = cp.get(profile, key.upper(), fallback="")
     return cfg
+
+
+def _save_section(profile: str, updates: dict, removes=()) -> None:
+    cp = _read_ini()
+    if not cp.has_section(profile):
+        cp.add_section(profile)
+    for k, v in updates.items():
+        cp.set(profile, k.upper(), v)
+    for k in removes:
+        cp.remove_option(profile, k.upper())
+    _write_ini(cp)
 
 
 def out(obj) -> None:
     print(json.dumps(obj, ensure_ascii=False))
 
 
+def ensure_device(cfg: dict) -> None:
+    """有 device_secret → 设备签名模式；仅有 token → 静默激活换设备凭证。
+
+    token 即一次性激活码：激活成功后立即核销并回写配置（TOKEN → DEVICE_*）。
+    旧服务端无 /auth/activate（404）或激活请求异常时回落 bearer 模式，不阻塞本次使用。
+    """
+    if cfg.get("device_secret") or not cfg.get("token"):
+        return
+    dev_id = cfg.get("device_id") or ("dev_" + uuid.uuid4().hex[:16])
+    body = json.dumps({"token": cfg["token"], "device_id": dev_id,
+                       "device_name": socket.gethostname()}).encode()
+    r = urllib.request.Request(cfg["server"].rstrip("/") + "/auth/activate",
+                               data=body, method="POST")
+    r.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(r, timeout=30,
+                                    context=_ssl_ctx(cfg["server"])) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        try:
+            detail = json.loads(raw).get("detail", raw[:200])
+        except ValueError:
+            detail = raw[:200]
+        if e.code == 404:      # 旧服务端 → 继续 bearer
+            return
+        if e.code == 409:      # token 已被激活（一次性）
+            out({"error": True, "http": 409,
+                 "detail": f"token 已被激活使用（一次性）：{detail}"})
+            sys.exit(3)
+        if e.code == 401:
+            fail(3, 401, {"detail": detail})
+        return                 # 5xx 等 → 本次按 bearer 尝试，不阻塞
+    except Exception:
+        return                 # 网络不可达 → 让后续真实请求报错
+    cfg["device_id"] = payload["device_id"]
+    cfg["device_secret"] = payload["device_secret"]
+    cfg["token"] = ""
+    _save_section(cfg["profile"],
+                  {"DEVICE_ID": cfg["device_id"],
+                   "DEVICE_SECRET": cfg["device_secret"]},
+                  removes=("TOKEN",))
+
+
+def _auth_headers(cfg: dict, method: str, path: str, body: bytes | None) -> dict:
+    """设备模式：HMAC-SHA256 请求签名（secret 永不上网络）；否则回落 bearer。"""
+    if cfg.get("device_secret"):
+        ts = str(int(time.time()))
+        nonce = uuid.uuid4().hex
+        digest = hashlib.sha256(body or b"").hexdigest()
+        msg = f"{ts}\n{method}\n{path}\n{digest}\n{nonce}"
+        sig = hmac.new(cfg["device_secret"].encode(), msg.encode(),
+                       hashlib.sha256).hexdigest()
+        return {"X-Device-Id": cfg["device_id"], "X-Timestamp": ts,
+                "X-Nonce": nonce, "X-Signature": sig}
+    if cfg.get("token"):
+        return {"Authorization": "Bearer " + cfg["token"]}
+    return {}
+
+
 def req(method: str, cfg: dict, path: str, body=None):
     url = cfg["server"].rstrip("/") + path
     data = json.dumps(body).encode() if body is not None else None
     r = urllib.request.Request(url, data=data, method=method)
-    r.add_header("Authorization", "Bearer " + cfg["token"])
+    for k, v in _auth_headers(cfg, method, path, data).items():
+        r.add_header(k, v)
     if data:
         r.add_header("Content-Type", "application/json")
     try:
@@ -178,7 +258,8 @@ def req_bytes(cfg: dict, path: str):
     """GET 二进制内容，返回 (status, bytes)。"""
     url = cfg["server"].rstrip("/") + path
     r = urllib.request.Request(url, method="GET")
-    r.add_header("Authorization", "Bearer " + cfg["token"])
+    for k, v in _auth_headers(cfg, "GET", path, None).items():
+        r.add_header(k, v)
     try:
         with urllib.request.urlopen(r, timeout=120, context=_ssl_ctx(cfg["server"])) as resp:
             return resp.status, resp.read()
@@ -187,7 +268,7 @@ def req_bytes(cfg: dict, path: str):
 
 
 def need_cfg(cfg: dict) -> None:
-    if not cfg["server"] or not cfg["token"]:
+    if not cfg["server"] or not (cfg["token"] or cfg["device_secret"]):
         out({"error": True, "detail": "CONFIG_MISSING",
              "profile": cfg["profile"]})
         sys.exit(4)
@@ -199,22 +280,33 @@ def cmd_config(args, cfg):
     profile = cfg["profile"]
     if args.set_token:
         cp = _read_ini()
-        if not cp.has_section(profile):
-            cp.add_section(profile)
         server = (args.server
-                  or cp.get(profile, "SERVER", fallback="")
+                  or (cp.get(profile, "SERVER", fallback="")
+                      if cp.has_section(profile) else "")
                   or DEFAULT_SERVER)
         server = SERVER_MIGRATIONS.get(server, server)
-        cp.set(profile, "SERVER", server)
-        cp.set(profile, "TOKEN", args.set_token)
-        _write_ini(cp)
+        # 先内存试激活，成功/回落才落盘；409（已核销）/401 直接退出，现有配置零改动
+        trial = {"profile": profile, "server": server, "token": args.set_token,
+                 "device_id": cfg.get("device_id", ""), "device_secret": ""}
+        ensure_device(trial)
+        if trial.get("device_secret"):
+            _save_section(profile, {"SERVER": server})  # DEVICE_* 已由激活写盘
+            activated = True
+        else:
+            # 旧服务端/暂不可达：存 TOKEN（首跑自动重试激活），作废旧设备凭证
+            _save_section(profile, {"SERVER": server, "TOKEN": args.set_token},
+                          removes=("DEVICE_SECRET",))
+            activated = False
         out({"saved": True, "profile": profile, "server": server,
-             "path": CFG_PATH})
+             "activated": activated, "path": CFG_PATH})
         return
     out({
-        "configured": bool(cfg["server"] and cfg["token"]),
+        "configured": bool(cfg["server"]
+                           and (cfg["token"] or cfg["device_secret"])),
         "profile": profile,
         "server": cfg["server"] or None,
+        "auth": ("device" if cfg.get("device_secret")
+                 else "bearer" if cfg.get("token") else None),
         "path": CFG_PATH,
     })
 
@@ -243,7 +335,10 @@ def _ver_tuple(v: str):
 def cmd_version(args, cfg):
     server = cfg["server"] or DEFAULT_SERVER
     result = {"client": __version__, "profile": cfg["profile"],
-              "brain": PACKAGE_BRAIN or None, "server": None}
+              "brain": PACKAGE_BRAIN or None,
+              "auth": ("device" if cfg.get("device_secret")
+                       else "bearer" if cfg.get("token") else None),
+              "server": None}
     try:
         with urllib.request.urlopen(server.rstrip("/") + "/health",
                                     timeout=10,
@@ -343,8 +438,10 @@ def cmd_tasks(args, cfg):
 
 
 def cmd_stream(args, cfg):
-    r = urllib.request.Request(cfg["server"].rstrip("/") + f"/tasks/{args.id}/stream")
-    r.add_header("Authorization", "Bearer " + cfg["token"])
+    path = f"/tasks/{args.id}/stream"
+    r = urllib.request.Request(cfg["server"].rstrip("/") + path)
+    for k, v in _auth_headers(cfg, "GET", path, None).items():
+        r.add_header(k, v)
     deadline = time.time() + args.timeout
     try:
         resp = urllib.request.urlopen(r, timeout=60, context=_ssl_ctx(cfg["server"]))
@@ -511,6 +608,7 @@ def main() -> None:
     cfg = load_cfg(args.profile)
     if args.cmd not in ("config", "profiles", "version"):
         need_cfg(cfg)
+        ensure_device(cfg)  # 旧配置首跑静默激活（一次性 token → 设备凭证）
     args.fn(args, cfg)
 
 

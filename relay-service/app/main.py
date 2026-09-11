@@ -103,7 +103,7 @@ td.desc{max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowra
 </div>
 <div id="newtok" style="display:none;background:#14532d;border:1px solid #166534;border-radius:10px;padding:14px;margin-bottom:16px"></div>
 <h2>现有凭证</h2><div id="toks"></div>
-<p style="font-size:12px;color:#64748b;margin-top:14px">token 是成员的访问凭证，请通过私聊发给本人。重置＝换新（旧 token 立即失效）；删除后该成员不能再提交任务，历史任务记录保留。完整 token 只在生成时显示一次。</p>
+<p style="font-size:12px;color:#64748b;margin-top:14px">token 是成员的<b>一次性激活码</b>：本人首次使用即核销并绑定设备，此后请求走设备签名，泄露的已核销 token 无法冒用；「未核销」＝还没人激活，请通过私聊发给本人。重置＝换发新激活码（旧码立即失效，已激活设备不受影响）；删除后该成员不能再提交任务，历史任务记录保留。</p>
 </div>
 <div id="view-shared" style="display:none">
 <p style="font-size:13px;color:#94a3b8">共享知识<b>取消隔离</b>：任何人上传即团队全员可用，<b>下一个任务自动加载、立即生效</b>（无需重启服务）。
@@ -273,11 +273,15 @@ async function refreshTokens(){
   const r=await fetch("/dashboard/tokens");if(!r.ok)throw 0;const d=await r.json();
   const us=d.users||[];
   const rows=us.map(u=>`<tr><td>${esc(u.name)}</td><td><code>${esc(u.token)}</code></td>
+   <td>${u.consumed_at
+     ?`<span style="color:#4ade80">已核销</span> <span style="font-size:11px;color:#64748b">${fmtT(u.consumed_at)}</span>`
+     :'<span style="color:#fbbf24" title="激活码尚未使用，持有者仍可激活">未核销</span>'}</td>
+   <td class="num" title="已激活绑定的设备数">${u.devices||0}</td>
    <td>${fmtT(u.created_at)}</td><td class="num">${u.tasks_7d}</td><td class="num">${u.done_7d}</td>
    <td><a href="#" class="act" data-a="regen" data-n="${esc(u.name)}">重置</a>
    <a href="#" class="act" data-a="del" data-n="${esc(u.name)}" style="color:#f87171">删除</a></td></tr>`).join("");
   document.getElementById("toks").innerHTML=rows
-   ?`<table><tr><th>用户</th><th>token</th><th>签发时间</th><th class="num">近7天任务</th><th class="num">完成</th><th>操作</th></tr>${rows}</table>`
+   ?`<table><tr><th>用户</th><th>token（激活码）</th><th>核销状态</th><th class="num">设备</th><th>签发时间</th><th class="num">近7天任务</th><th class="num">完成</th><th>操作</th></tr>${rows}</table>`
    :'<p style="font-size:13px;color:#64748b">暂无成员</p>';
  }catch(e){}
 }
@@ -1286,6 +1290,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
     async def dashboard_tokens(request: Request):
         _dash_auth(request)
         stats = {u["user"]: u for u in db.report(7)["by_user"]}
+        dev_counts = db.device_counts()
         users = []
         for u in db.list_users():
             s = stats.get(u["name"], {})
@@ -1293,6 +1298,8 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
                 "name": u["name"],
                 "token": _token_mask(u["token"]),
                 "created_at": u["created_at"],
+                "consumed_at": u.get("consumed_at"),
+                "devices": dev_counts.get(u["name"], 0),
                 "tasks_7d": s.get("tasks", 0),
                 "done_7d": s.get("done", 0),
             })

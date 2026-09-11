@@ -279,6 +279,12 @@ class DB:
             "SELECT device_id, user_name, device_name, created_at, last_seen, last_ip,"
             " revoked_at FROM devices WHERE user_name = ? ORDER BY created_at", (name,))]
 
+    def device_counts(self) -> dict[str, int]:
+        """各用户活跃（未吊销）设备数，监控页展示用。"""
+        return {r["user_name"]: r["n"] for r in self._q(
+            "SELECT user_name, COUNT(*) AS n FROM devices"
+            " WHERE revoked_at IS NULL GROUP BY user_name")}
+
     def revoke_device(self, name: str, device_id: str) -> bool:
         _, rowcount = self._run(
             "UPDATE devices SET revoked_at=? WHERE device_id=? AND user_name=?"

@@ -91,6 +91,17 @@ def test_token_mgmt_crud(relay_dash):
         assert u["token"] == tok1
         assert u["tasks_7d"] == 0 and u["done_7d"] == 0
         assert u["created_at"] > 0
+        # 核销状态：未激活 → consumed_at 为空、设备数 0
+        assert u["consumed_at"] is None and u["devices"] == 0
+
+        # 激活（核销 token 并绑定设备）→ 监控页体现「已核销」+ 设备数
+        r = httpx.post(base + "/auth/activate",
+                       json={"token": tok1, "device_id": "dev-dash-1",
+                             "device_name": "pytest"}, timeout=10)
+        assert r.status_code == 200, r.text
+        u = c.get("/dashboard/tokens").json()["users"][0]
+        assert u["consumed_at"] and u["consumed_at"] > 0
+        assert u["devices"] == 1
 
         # 改（重置）：旧 token 立即失效，新 token 可用
         r = c.post("/dashboard/tokens/%E6%B5%8B%E8%AF%95%E5%91%98/regenerate")  # 测试员

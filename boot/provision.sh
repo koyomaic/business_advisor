@@ -416,6 +416,40 @@ else
   if cp "$OC_TMPL" "$OC_GLOBAL"; then ok "已安装/同步（旧版备份 *.bak-provision-*）"; else warn "同步失败"; fi
 fi
 
+# ---------- 21d team-agent-relay ca.pem（公开 CA 证书，不入 git；统一从 RELAY_CA_SRC 的 TLS 链提取） ----------
+step "relay技能ca.pem"
+RELAY_CA_SRC="${RELAY_CA_SRC:-10.189.51.23:8788}"
+TAR_SRC="$RES_ROOT/skills/team-agent-relay"
+if [ ! -d "$TAR_SRC" ]; then warn "仓库无 team-agent-relay，跳过"
+else
+  TAR_DST="$(head -1 "$TAR_SRC/.dest" 2>/dev/null | tr -d '[:space:]')"
+  TAR_DST="${TAR_DST:-$WORKSPACE/shared/skills}/team-agent-relay"
+  if [ ! -d "$TAR_DST" ]; then warn "安装位 $TAR_DST 不存在（基础技能未同步？），跳过"
+  elif ! command -v openssl >/dev/null; then warn "缺 openssl，无法提取"
+  else
+    CA_PEM="$(echo | timeout 10 openssl s_client -connect "$RELAY_CA_SRC" -showcerts 2>/dev/null \
+      | awk '/-----BEGIN CERTIFICATE-----/{n++} n==2{print} /-----END CERTIFICATE-----/&&n==2{exit}')"
+    CA_SUBJ="$(printf '%s\n' "$CA_PEM" | openssl x509 -noout -subject 2>/dev/null)"
+    CA_ISSR="$(printf '%s\n' "$CA_PEM" | openssl x509 -noout -issuer 2>/dev/null)"
+    if [ -z "$CA_PEM" ] || [ -z "$CA_SUBJ" ] || [ "${CA_SUBJ#subject=}" != "${CA_ISSR#issuer=}" ]; then
+      if [ -f "$TAR_DST/ca.pem" ]; then ok "提取源 $RELAY_CA_SRC 不可达，沿用现有 ca.pem"
+      else warn "无法从 $RELAY_CA_SRC 提取自签 CA（不可达或链不完整）"; fi
+    else
+      NEW_FP="$(printf '%s\n' "$CA_PEM" | openssl x509 -noout -fingerprint -sha256 2>/dev/null)"
+      OLD_FP="$([ -f "$TAR_DST/ca.pem" ] && openssl x509 -in "$TAR_DST/ca.pem" -noout -fingerprint -sha256 2>/dev/null)"
+      if [ -n "$OLD_FP" ] && [ "$NEW_FP" = "$OLD_FP" ]; then ok "与 $RELAY_CA_SRC 一致"
+      elif ! heal; then warn "缺失或与 $RELAY_CA_SRC 漂移（install 模式自动提取）"
+      else
+        miss "提取写入"
+        [ -f "$TAR_DST/ca.pem" ] && cp "$TAR_DST/ca.pem" "$TAR_DST/ca.pem.bak-provision-$(date +%Y%m%d-%H%M)"
+        if printf '%s\n' "$CA_PEM" > "$TAR_DST/ca.pem"; then
+          chmod 644 "$TAR_DST/ca.pem"; ok "ca.pem 已写入（${CA_SUBJ#subject=}）"
+        else warn "写入失败"; fi
+      fi
+    fi
+  fi
+fi
+
 # ---------- 22 workspace opencode.json（内网 MCP，SOFT） ----------
 step "workspace MCP配置"
 if [ -f "$WORKSPACE/opencode.json" ]; then ok

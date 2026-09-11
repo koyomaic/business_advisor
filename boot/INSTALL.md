@@ -64,6 +64,7 @@ curl -fsSL https://raw.githubusercontent.com/koyomaic/business_advisor/main/boot
 | 23-24 | workspace AGENTS.md / opencode.json | 仓库模板安装 / 提示拷贝 | 软 |
 | 24b | 基础技能：仅仓库 `skills/` 内人为标记入库的（机队共享，git 为真源），逐文件比对安装位同名技能（安装位由技能内 `.dest` 指定：钉钉套件→`/root/.agents/skills`、dws→`/opt/team/skills`，缺省 `shared/skills/`） | 缺失/漂移 → 本地旧版备份 `*.bak-provision-*` 后同步仓库版；未入库的本地/实验技能不碰 | 软 |
 | 24c | opencode 全局语境 `/root/.config/opencode/AGENTS.md`（模板 `boot/opencode-global-AGENTS.md`，git 为真源；所有会话默认加载 GitHub 项目指向等语境） | 缺失/漂移 → 备份后同步模板 | 软 |
+| 24d | team-agent-relay 安装位 `ca.pem`（公开 CA 证书，不入 git；统一从 `RELAY_CA_SRC`（缺省 `10.189.51.23:8788`）TLS 链提取，自签校验后写入） | 缺失/漂移 → 备份后提取写入；源不可达且已有现存 → 沿用 | 软 |
 | 25-26 | claude-proxy / relay-tls-proxy | 缺则装（tls 仅证书存在时） | 软 |
 | 27 | 首装引导（无现役 release → boot.sh boot 完整部署） | 自动 | 硬 |
 | 28 | relay active+healthy | enable/start/restart | 硬 |

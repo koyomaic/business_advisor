@@ -25,7 +25,7 @@
 配置: 环境变量 TEAM_AGENT_SERVER/TEAM_AGENT_TOKEN/TEAM_AGENT_PROFILE 优先，
 其次 ~/.team-agent/config（INI 多节，每节一组 SERVER=/TOKEN=，节名即 profile；
 旧版无节平铺格式首次加载自动迁移为 [default] 并回写）。
-连接: 默认 https://10.189.51.23:8788（中鲁），TLS 校验固定用本目录 ca.pem
+连接: 默认 https://10.189.51.23:8788（控股经营助理），TLS 校验固定用本目录 ca.pem
 （CA 缺失时退回系统默认校验）；历史默认地址（.23:8787 http、.29:8787 http）
 首次加载时按 SERVER_MIGRATIONS 自动迁移并回写。.29 为新能源中转，
 新能源成员用 --profile 新能源 --server https://10.189.51.29:8788 配置。

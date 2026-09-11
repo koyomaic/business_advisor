@@ -247,6 +247,9 @@ def req(method: str, cfg: dict, path: str, body=None):
         except ValueError:
             payload = {"detail": raw[:300] or str(e)}
         return e.code, payload
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        out({"error": True, "detail": f"无法连接服务器 {cfg['server']}: {e}"})
+        sys.exit(1)
 
 
 def fail(code: int, status: int, payload) -> None:
@@ -265,6 +268,9 @@ def req_bytes(cfg: dict, path: str):
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        out({"error": True, "detail": f"无法连接服务器 {cfg['server']}: {e}"})
+        sys.exit(1)
 
 
 def need_cfg(cfg: dict) -> None:
@@ -447,6 +453,9 @@ def cmd_stream(args, cfg):
         resp = urllib.request.urlopen(r, timeout=60, context=_ssl_ctx(cfg["server"]))
     except urllib.error.HTTPError as e:
         fail(3 if e.code == 401 else 1, e.code, {"detail": str(e)})
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        out({"error": True, "detail": f"无法连接服务器 {cfg['server']}: {e}"})
+        sys.exit(1)
     with resp:
         for raw in resp:
             if time.time() > deadline:

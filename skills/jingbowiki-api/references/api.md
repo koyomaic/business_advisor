@@ -4225,7 +4225,31 @@ curl 'http://10.200.3.235:18082/api/v1/knowledge-bases/<知识库ID>/hybrid-sear
 | type        | string | 是   | 模型类型，可选值：`KnowledgeQA` / `Embedding` / `Rerank` / `VLLM` / `ASR` |
 | source      | string | 是   | 模型来源，可选值：`local` / `remote`                            |
 | description | string | 否   | 模型描述                                                        |
-| parameters  | object | 是   | 模型参数，详见下方 Parameters           |
+| parameters  | object | 是   | 模型参数，见下方远程模型参数              |
+
+远程模型参数（`source=remote`，OpenAI 兼容接口）：
+
+| 字段     | 类型   | 必填 | 说明                                    |
+| -------- | ------ | ---- | --------------------------------------- |
+| base_url | string | 是   | 服务地址（OpenAI 兼容，含 `/v1` 路径）  |
+| api_key  | string | 是   | 服务密钥                                |
+| provider | string | 否   | 服务商标识，通用/自建网关用 `generic`   |
+
+请求示例（远程模型）：
+
+```json
+{
+  "name": "Qwen3.8-27B-FP8-E",
+  "type": "KnowledgeQA",
+  "source": "remote",
+  "description": "内网模型",
+  "parameters": {
+    "base_url": "http://model.example.com:30131/v1",
+    "api_key": "sk-xxxxx",
+    "provider": "generic"
+  }
+}
+```
 
 响应：201：创建的模型。
 
@@ -4308,10 +4332,39 @@ curl 'http://10.200.3.235:18082/api/v1/knowledge-bases/<知识库ID>/hybrid-sear
 ```json
 {
   "data": {
-    "chat_model_id": "model-00000001",
-    "embedding_model_id": "model-00000002",
-    "rerank_model_id": "model-00000003",
-    "multimodal_id": "model-00000004"
+    "hasFiles": false,
+    "documentSplitting": {
+      "chunkSize": 1500,
+      "chunkOverlap": 150,
+      "separators": null
+    },
+    "llm": {
+      "baseUrl": "http://model.example.com:30131/v1",
+      "credentials": {
+        "apiKey": true
+      },
+      "modelName": "Qwen3.8-27B-FP8-E",
+      "source": "remote"
+    },
+    "multimodal": {
+      "enabled": false
+    },
+    "nodeExtract": {
+      "enabled": false
+    },
+    "questionGeneration": {
+      "enabled": false,
+      "questionCount": 0,
+      "customInstructions": ""
+    },
+    "rerank": {
+      "enabled": false,
+      "baseUrl": "",
+      "modelName": "",
+      "credentials": {
+        "apiKey": false
+      }
+    }
   },
   "success": true
 }
@@ -4344,19 +4397,23 @@ curl 'http://10.200.3.235:18082/api/v1/knowledge-bases/<知识库ID>/hybrid-sear
 
 **PUT `/api/v1/initialization/config/{kb_id}`**
 
+| 字段         | 类型   | 必填 | 说明                              |
+| ------------ | ------ | ---- | --------------------------------- |
+| llmModelId   | string | 是   | 问答模型 ID（来自 GET `/api/v1/models`） |
+
 请求示例：
 
 ```json
 {
-  "chat_model_id": "model-00000010",
-  "embedding_model_id": "model-00000002"
+  "llmModelId": "11111111-2222-3333-4444-555555555555"
 }
 ```
 
-响应示例（主要字段）：
+响应示例：
 
 ```json
 {
+  "message": "配置更新成功",
   "success": true
 }
 ```
@@ -4501,9 +4558,9 @@ curl 'http://10.200.3.235:18082/api/v1/knowledge-bases/<知识库ID>/hybrid-sear
 
 ```json
 {
-  "api_url": "https://api.openai.com/v1",
-  "api_key": "sk-xxxxx",
-  "model": "gpt-4o"
+  "baseUrl": "https://api.openai.com/v1",
+  "apiKey": "sk-xxxxx",
+  "modelName": "gpt-4o"
 }
 ```
 
@@ -4512,8 +4569,8 @@ curl 'http://10.200.3.235:18082/api/v1/knowledge-bases/<知识库ID>/hybrid-sear
 ```json
 {
   "data": {
-    "success": true,
-    "message": "模型可用"
+    "available": true,
+    "message": "连接正常，模型可用"
   },
   "success": true
 }

@@ -72,6 +72,7 @@ class Settings:
     min_client_version: str = ""  # 要求的最低客户端版本（空=不校验；/health 透出，客户端软提醒）
     auth_legacy: bool = False     # 旧式 bearer token 认证（生产默认关：token 仅作一次性激活码；过渡需要时置 1）
     sign_window: int = 900        # 设备签名时间窗（秒），防重放；放宽以容忍成员机器时钟漂移
+    cleanup_runtime: bool = True  # 任务终态后自动清理 workdir 临时目录（home/data）；置 0 关闭
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -102,4 +103,6 @@ class Settings:
             auth_legacy=os.environ.get("RELAY_AUTH_LEGACY", "0").strip().lower()
             in ("1", "true", "on", "yes"),
             sign_window=int(os.environ.get("RELAY_SIGN_WINDOW", "60")),
+            cleanup_runtime=os.environ.get("RELAY_CLEANUP_RUNTIME", "1").strip().lower()
+            in ("1", "true", "on", "yes"),
         )

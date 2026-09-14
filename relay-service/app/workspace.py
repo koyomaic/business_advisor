@@ -64,6 +64,22 @@ class Workspace:
             self.db.set(task["id"], workdir=workdir)
         return workdir
 
+    def cleanup_terminal(self, task: dict) -> None:
+        """任务进入终态后清理 workdir 临时目录：home/（agent 缓存）与 data/（工作数据）。
+
+        保留 .result/（变更文件，供跨任务冲突备份）与 .baseline.json。幂等，目录缺失即跳过。
+        """
+        if not self.cfg.cleanup_runtime:
+            return
+        workdir = task.get("workdir") or os.path.join(self.cfg.task_root, str(task["id"]))
+        for sub in ("home", "data"):
+            p = os.path.join(workdir, sub)
+            if os.path.isdir(p):
+                try:
+                    shutil.rmtree(p)
+                except OSError:
+                    pass
+
     def scan(self, task: dict) -> dict:
         """任务结束后的变更扫描（事后兜底）。"""
         workdir = task["workdir"]

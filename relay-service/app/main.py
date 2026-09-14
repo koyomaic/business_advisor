@@ -472,7 +472,7 @@ def _launch_boot(boot: str) -> tuple[bool, str]:
         return False, f"launch failed: {e!r}"
 
 
-def sweep_stale(db, bus, audit, cfg) -> list[int]:
+def sweep_stale(db, bus, audit, cfg, ws) -> list[int]:
     """把停留超时（created_at 早于阈值）的 review/待审批 任务自动置为 done 并标记。
 
     返回被清扫的 task_id 列表。
@@ -484,6 +484,7 @@ def sweep_stale(db, bus, audit, cfg) -> list[int]:
             bus.publish(t["id"], t="status", s="done", error="超时自动done")
             audit.line(t["id"], t["user"], "auto_done_timeout",
                        f"停留超过 {cfg.stale_timeout_hours:g}h，超时自动done")
+            ws.cleanup_terminal(t)
             swept.append(t["id"])
     return swept
 
@@ -583,6 +584,8 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
                     changed=scan["all"][:200], conflicts=conflicts)
         audit.line(task_id, row["user"], "stop", status)
         cancel_events.pop(task_id, None)
+        if status in TERMINAL:
+            ws.cleanup_terminal(row)
 
     def _check_conflicts(row: dict, scan: dict, finished_at: float) -> list[dict]:
         conflicts: list[dict] = []
@@ -624,6 +627,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             db.set(task_id, status="failed", error=f"internal error: {exc!r}",
                    finished_at=time.time())
             bus.publish(task_id, t="status", s="failed", error=str(exc))
+            ws.cleanup_terminal(row)
         audit.line(task_id, row["user"] if row else "?", "error", repr(exc))
 
     @asynccontextmanager
@@ -643,7 +647,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         async def sweeper():
             while True:
                 try:
-                    sweep_stale(db, bus, audit, cfg)
+                    sweep_stale(db, bus, audit, cfg, ws)
                 except Exception as e:  # 清扫异常不拖垮服务
                     audit.line(0, "__sweeper__", "error", repr(e))
                 try:
@@ -890,6 +894,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         db.set(task_id, status=body.outcome)
         bus.publish(task_id, t="status", s=body.outcome)
         audit.line(task_id, row["user"], "confirm", body.outcome)
+        ws.cleanup_terminal(row)
         return db.task(task_id)
 
     @app.post("/tasks/{task_id}/approve")

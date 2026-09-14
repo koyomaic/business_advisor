@@ -28,9 +28,11 @@
 配置: 环境变量 TEAM_AGENT_SERVER/TEAM_AGENT_TOKEN/TEAM_AGENT_PROFILE 优先，
 其次 ~/.team-agent/config（INI 多节，每节一组 SERVER=/TOKEN=，节名即 profile；
 旧版无节平铺格式首次加载自动迁移为 [default] 并回写）。
-连接: 默认 https://10.189.51.23:8788（控股经营助理），TLS 校验固定用本目录 ca.pem
-（CA 缺失时退回系统默认校验）；历史默认地址（.23:8787 http、.29:8787 http）
-首次加载时按 SERVER_MIGRATIONS 自动迁移并回写。.29 为新能源中转，
+连接: 默认 https://10.189.51.23:8788（控股经营助理）。传输安全策略（1.4.1）：
+仅允许 https——http:// 地址直接拒绝（除非显式 --insecure/TEAM_AGENT_INSECURE=1，
+仅排障用）；TLS 校验独占固定本目录 ca.pem（不叠加系统 CA），ca.pem 缺失时
+拒绝发起请求（fail-fast，不静默回退系统信任库）。历史默认地址（.23:8787 http、
+.29:8787 http）首次加载时按 SERVER_MIGRATIONS 自动迁移并回写。.29 为新能源中转，
 新能源成员用 --profile 新能源 --server https://10.189.51.29:8788 配置。
 """
 from __future__ import annotations
@@ -51,7 +53,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 # 打包时由 pack.sh 写入：本技能所代表的 dws 认证大脑名（同时作为缺省 profile 名）。
 # 源模板留空 → 缺省 profile 回落 "default"。
@@ -70,14 +72,38 @@ TERMINAL = {"done", "review", "conflict", "failed", "cancelled"}
 MAX_FILE_BYTES = 1 * 1024 * 1024  # 文件通道单文件上限 1MB
 
 
-def _ssl_ctx(server: str):
-    """https 返回 SSLContext（ca.pem 存在则固定校验），http 返回 None。"""
+def _ssl_ctx(server: str, insecure: bool = False):
+    """https 返回 SSLContext，http 返回 None（http 是否放行由 _check_transport 把关）。
+
+    安全策略（1.4.1）：
+    - ca.pem 存在 → 独占 pinning：只信任 ca.pem，不叠加系统 CA（防信任面扩大）；
+    - ca.pem 缺失 → fail-fast 拒绝发起请求，不静默回退系统信任库；
+    - insecure（--insecure / TEAM_AGENT_INSECURE=1）→ 显式跳过校验，仅排障用。
+    """
     if not server.startswith("https://"):
         return None
-    ctx = ssl.create_default_context()
-    if os.path.isfile(CA_PEM):
-        ctx.load_verify_locations(CA_PEM)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    if insecure:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    if not os.path.isfile(CA_PEM):
+        out({"error": True, "detail": "CA_PEM_MISSING", "path": CA_PEM,
+             "hint": "ca.pem 缺失：已拒绝回退系统信任库（防校验降级）。"
+                     "请将 ca.pem 补入本技能目录后重试；排障可显式 --insecure（不推荐）"})
+        sys.exit(5)
+    ctx.load_verify_locations(CA_PEM)
     return ctx
+
+
+def _check_transport(cfg: dict) -> None:
+    """传输层安全门：拒绝明文 http://（除非显式 insecure）；已知旧地址在 SERVER_MIGRATIONS 已自动升级。"""
+    server = cfg.get("server", "")
+    if server.startswith("http://") and not cfg.get("insecure"):
+        out({"error": True, "detail": "INSECURE_TRANSPORT_REFUSED", "server": server,
+             "hint": "已拒绝明文 http:// 连接（凭证与任务内容会裸奔、签名可被截获重放）。"
+                     "请改用 https:// 地址；确需明文排障时显式加 --insecure 或 TEAM_AGENT_INSECURE=1"})
+        sys.exit(5)
 
 
 def _new_cp() -> configparser.ConfigParser:
@@ -184,7 +210,8 @@ def ensure_device(cfg: dict) -> None:
     r.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(r, timeout=30,
-                                    context=_ssl_ctx(cfg["server"])) as resp:
+                                    context=_ssl_ctx(cfg["server"],
+                                                     cfg.get("insecure"))) as resp:
             payload = json.loads(resp.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", "replace")
@@ -237,7 +264,8 @@ def req(method: str, cfg: dict, path: str, body=None):
     if data:
         r.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(r, timeout=60, context=_ssl_ctx(cfg["server"])) as resp:
+        with urllib.request.urlopen(r, timeout=60,
+                                    context=_ssl_ctx(cfg["server"], cfg.get("insecure"))) as resp:
             raw = resp.read().decode("utf-8", "replace")
             return resp.status, (json.loads(raw) if raw else {})
     except urllib.error.HTTPError as e:
@@ -264,7 +292,8 @@ def req_bytes(cfg: dict, path: str):
     for k, v in _auth_headers(cfg, "GET", path, None).items():
         r.add_header(k, v)
     try:
-        with urllib.request.urlopen(r, timeout=120, context=_ssl_ctx(cfg["server"])) as resp:
+        with urllib.request.urlopen(r, timeout=120,
+                                    context=_ssl_ctx(cfg["server"], cfg.get("insecure"))) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
@@ -291,6 +320,7 @@ def cmd_config(args, cfg):
                       if cp.has_section(profile) else "")
                   or DEFAULT_SERVER)
         server = SERVER_MIGRATIONS.get(server, server)
+        _check_transport({"server": server, "insecure": cfg.get("insecure")})
         # 先内存试激活，成功/回落才落盘；409（已核销）/401 直接退出，现有配置零改动
         trial = {"profile": profile, "server": server, "token": args.set_token,
                  "device_id": cfg.get("device_id", ""), "device_secret": ""}
@@ -340,6 +370,7 @@ def _ver_tuple(v: str):
 
 def cmd_version(args, cfg):
     server = cfg["server"] or DEFAULT_SERVER
+    _check_transport({"server": server, "insecure": cfg.get("insecure")})
     result = {"client": __version__, "profile": cfg["profile"],
               "brain": PACKAGE_BRAIN or None,
               "auth": ("device" if cfg.get("device_secret")
@@ -348,7 +379,8 @@ def cmd_version(args, cfg):
     try:
         with urllib.request.urlopen(server.rstrip("/") + "/health",
                                     timeout=10,
-                                    context=_ssl_ctx(server)) as resp:
+                                    context=_ssl_ctx(server,
+                                                     cfg.get("insecure"))) as resp:
             health = json.loads(resp.read().decode("utf-8", "replace"))
         minv = health.get("min_client_version") or ""
         result["server"] = {
@@ -450,7 +482,9 @@ def cmd_stream(args, cfg):
         r.add_header(k, v)
     deadline = time.time() + args.timeout
     try:
-        resp = urllib.request.urlopen(r, timeout=60, context=_ssl_ctx(cfg["server"]))
+        resp = urllib.request.urlopen(r, timeout=60,
+                                      context=_ssl_ctx(cfg["server"],
+                                                       cfg.get("insecure")))
     except urllib.error.HTTPError as e:
         fail(3 if e.code == 401 else 1, e.code, {"detail": str(e)})
     except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -537,6 +571,8 @@ def main() -> None:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--profile", default="",
                         help="配置 profile 名（缺省 default；env TEAM_AGENT_PROFILE）")
+    common.add_argument("--insecure", action="store_true",
+                        help="允许明文 http:// 与跳过 TLS 校验（仅排障；env TEAM_AGENT_INSECURE=1）")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("config", parents=[common])
@@ -615,8 +651,11 @@ def main() -> None:
 
     args = ap.parse_args()
     cfg = load_cfg(args.profile)
+    cfg["insecure"] = (bool(getattr(args, "insecure", False))
+                       or os.environ.get("TEAM_AGENT_INSECURE", "") == "1")
     if args.cmd not in ("config", "profiles", "version"):
         need_cfg(cfg)
+        _check_transport(cfg)
         ensure_device(cfg)  # 旧配置首跑静默激活（一次性 token → 设备凭证）
     args.fn(args, cfg)
 

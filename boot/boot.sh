@@ -45,9 +45,14 @@ current_sha() {
   basename "$(dirname "$(readlink -f "$CURRENT_LINK")")"
 }
 
-health_version() {
-  curl -sf -m 3 "$HEALTH_URL" \
-    | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' 2>/dev/null || echo ""
+health_version() { # 双探：TLS 直听主机走 https:8788（自签 -k），否则回落 HEALTH_URL（明文/回环转发）
+  local u v
+  for u in "https://127.0.0.1:8788/health" "${HEALTH_URL:-http://127.0.0.1:8787/health}"; do
+    v="$(curl -sfk -m 3 "$u" \
+      | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' 2>/dev/null)" || true
+    [ -n "$v" ] && { echo "$v"; return 0; }
+  done
+  echo ""
 }
 
 wait_healthy() { # $1=期望 version（空=只要健康即可）

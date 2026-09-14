@@ -30,6 +30,8 @@ DASH_TTL = 12 * 3600
 MAX_FILE_BYTES = 1 * 1024 * 1024  # 文件上传/下载通道单文件上限 1MB
 LOGIN_MAX_FAILS = 5               # dashboard 登录：窗口内同 IP 失败达此次数 → 锁定（防爆破底线）
 LOGIN_LOCK_SEC = 15 * 60          # 锁定与滑动窗口时长：15 分钟
+ACTIVATE_MAX_FAILS = 10           # /auth/activate：窗口内同 IP 无效码达此次数 → 429（防御纵深）
+ACTIVATE_LOCK_SEC = 15 * 60
 
 LOGIN_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -768,18 +770,40 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
 
     # ---- 设备激活与管理（token=一次性激活码，激活后换设备凭证签名认证） ----
 
+    activate_fails: dict[str, list[float]] = {}  # ip -> 窗口内无效码时间戳（限频纵深）
+
+    def _activate_locked(ip: str) -> int:
+        """滑动窗口内无效激活码达上限 → 返回剩余锁定秒数；0=未锁。"""
+        now = time.time()
+        ts = [t for t in activate_fails.get(ip, ()) if now - t < ACTIVATE_LOCK_SEC]
+        if ts:
+            activate_fails[ip] = ts
+        else:
+            activate_fails.pop(ip, None)
+        if len(ts) >= ACTIVATE_MAX_FAILS:
+            return max(1, int(ACTIVATE_LOCK_SEC - (now - ts[0])) + 1)
+        return 0
+
     @app.post("/auth/activate")
     async def activate_device(body: ActivateBody, request: Request):
         tok = body.token.strip()
-        u = db.user_by_token(tok)
         ip = request.client.host if request.client else ""
+        left = _activate_locked(ip)
+        if left:
+            audit.line(0, "__unknown__", "activate_locked", f"ip={ip} retry={left}")
+            raise HTTPException(status_code=429,
+                                detail=f"无效激活码尝试过多，请 {left} 秒后再试",
+                                headers={"Retry-After": str(left)})
+        u = db.user_by_token(tok)
         if not u:
+            activate_fails.setdefault(ip, []).append(time.time())
             audit.line(0, "__unknown__", "activate_fail", f"invalid token ip={ip}")
             raise HTTPException(status_code=401, detail="invalid token")
         if u.get("consumed_at") or not db.consume_token(tok):
             audit.line(0, u["name"], "activate_fail", f"token consumed ip={ip}")
             raise HTTPException(status_code=409,
                                 detail="token 已被激活使用（一次性）；请联系管理员补发")
+        activate_fails.pop(ip, None)
         dev_id = body.device_id.strip() or ("dev_" + secrets.token_urlsafe(12))
         dev_name = body.device_name.strip()[:60]
         secret = secrets.token_urlsafe(32)
@@ -1207,14 +1231,17 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
     dash_sessions: dict[str, float] = {}
     login_fails: dict[str, list[float]] = {}  # ip -> 窗口内失败时间戳（登录防爆破）
 
-    def _login_locked(ip: str) -> bool:
+    def _login_locked(ip: str) -> int:
+        """滑动窗口内失败达上限 → 返回剩余锁定秒数；0=未锁。"""
         now = time.time()
         ts = [t for t in login_fails.get(ip, ()) if now - t < LOGIN_LOCK_SEC]
         if ts:
             login_fails[ip] = ts
         else:
             login_fails.pop(ip, None)
-        return len(ts) >= LOGIN_MAX_FAILS
+        if len(ts) >= LOGIN_MAX_FAILS:
+            return max(1, int(LOGIN_LOCK_SEC - (now - ts[0])) + 1)
+        return 0
 
     def _dash_ok(request: Request) -> bool:
         if not cfg.dashboard_password:
@@ -1265,8 +1292,17 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         if not cfg.dashboard_password:
             raise HTTPException(status_code=404, detail="not found")
         ip = request.client.host if request.client else "?"
-        if _login_locked(ip):
-            return RedirectResponse("/?e=2", status_code=303)
+        left = _login_locked(ip)
+        if left:
+            audit.line(0, "__dashboard__", "login_locked", f"ip={ip} retry={left}")
+            return HTMLResponse(
+                '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
+                "<title>尝试次数过多</title></head>"
+                '<body style="margin:0;min-height:100vh;display:flex;align-items:center;'
+                'justify-content:center;background:#0f172a;color:#e2e8f0;font:15px/1.6 '
+                'system-ui,sans-serif"><div style="text-align:center">尝试次数过多，已临时锁定'
+                f"<br>请约 {max(1, left // 60)} 分钟后再试</div></body></html>",
+                status_code=429, headers={"Retry-After": str(left)})
         if not secrets.compare_digest(password, cfg.dashboard_password):
             fails = login_fails.setdefault(ip, [])
             fails.append(time.time())
@@ -1277,7 +1313,8 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         dash_sessions[tok] = time.time() + DASH_TTL
         resp = RedirectResponse("/", status_code=302)
         resp.set_cookie(DASH_COOKIE, tok, max_age=DASH_TTL, httponly=True,
-                        samesite="strict", path="/")
+                        samesite="strict", path="/",
+                        secure=(request.url.scheme == "https"))
         return resp
 
     @app.get("/logout")

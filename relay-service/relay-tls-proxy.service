@@ -1,11 +1,11 @@
 [Unit]
-Description=Relay TLS 代理（https:8788 → http:127.0.0.1:8787，全机唯一应用实例，避免双调度器重复执行）
+Description=Relay 回环明文转发（http:127.0.0.1:8787 → https:127.0.0.1:8788，仅本机健康检查兼容；TLS 由 relay.service 直听终结，真实客户端 IP 不经代理丢失）
 After=network.target relay.service
 Wants=relay.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat OPENSSL-LISTEN:8788,cert=/mnt/vol-eltaah12/workspace/shared/secrets/relay-tls/fullchain.pem,key=/mnt/vol-eltaah12/workspace/shared/secrets/relay-tls/server.key,verify=0,fork,reuseaddr TCP:127.0.0.1:8787
+ExecStart=/usr/bin/socat TCP4-LISTEN:8787,bind=127.0.0.1,fork,reuseaddr OPENSSL:127.0.0.1:8788,verify=0
 Restart=always
 RestartSec=3
 

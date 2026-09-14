@@ -7,7 +7,8 @@ Type=simple
 WorkingDirectory=__CURRENT_LINK__
 EnvironmentFile=-__CURRENT_LINK__/relay.defaults.env
 EnvironmentFile=__WORKSPACE__/relay.env
-ExecStart=__VENV__/bin/python -m uvicorn app.entry:app --host 0.0.0.0 --port 8787
+Environment=RELAY_TLS_DIR=__WORKSPACE__/shared/secrets/relay-tls
+ExecStart=__VENV__/bin/python -m app.serve
 Restart=on-failure
 RestartSec=3
 

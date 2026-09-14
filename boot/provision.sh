@@ -78,14 +78,19 @@ pkg_install() { # 尽力而为的系统包安装（apt/dnf）
   fi
 }
 
-wait_healthy() { # $1=秒数
-  local i; for i in $(seq 1 "${1:-30}"); do
-    curl -sf -m 3 "$HEALTH_URL" 2>/dev/null | grep -q '"ok"[[:space:]]*:[[:space:]]*true' && return 0
+wait_healthy() { # $1=秒数；双探：TLS 直听 https:8788 优先，回落 HEALTH_URL（明文/回环转发）
+  local i u; for i in $(seq 1 "${1:-30}"); do
+    for u in "https://127.0.0.1:8788/health" "$HEALTH_URL"; do
+      curl -sfk -m 3 "$u" 2>/dev/null | grep -q '"ok"[[:space:]]*:[[:space:]]*true' && return 0
+    done
     sleep 1
   done; return 1; }
 
 health_version() {
-  curl -sf -m 3 "$HEALTH_URL" 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' 2>/dev/null || echo ""
+  local u v; for u in "https://127.0.0.1:8788/health" "$HEALTH_URL"; do
+    v="$(curl -sfk -m 3 "$u" 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' 2>/dev/null)" || true
+    [ -n "$v" ] && { echo "$v"; return 0; }
+  done; echo ""
 }
 
 restore_from_backup() { # 用最新备份包补齐 workspace 缺失文件；成功时 echo 包名
@@ -230,6 +235,14 @@ elif heal; then
   cp "$RES_ROOT/boot/boot.sh" "$BOOT_DIR/boot.sh" && chmod 700 "$BOOT_DIR/boot.sh" && ok "已同步" || abort "boot.sh 同步失败"
 elif [ -f "$BOOT_DIR/boot.sh" ]; then warn "与资源树有漂移（install 模式自动同步）"
 else bad "缺失"; fi
+
+# ---------- 13b TLS 布局迁移：旧 socat 占 8788 先让位（relay.service 改为 TLS 直听，真实客户端 IP 不再被代理遮蔽；8787 明文口随后收敛为仅回环） ----------
+if systemctl is-active --quiet relay-tls-proxy 2>/dev/null \
+   && grep -q "OPENSSL-LISTEN:8788" "$UNIT_DIR/relay-tls-proxy.service" 2>/dev/null; then
+  step "TLS布局迁移"
+  miss "停旧 socat(0.0.0.0:8788)，让位 relay.service TLS 直听"
+  systemctl stop relay-tls-proxy && ok "已停（新回环转发单元在 24 节同步）" || warn "停止失败（单元同步时将重试）"
+fi
 
 # ---------- 14-16 systemd 单元（仓库真源，渲染→比对→同步） ----------
 sync_unit() { # sync_unit <项目名> <模板路径> <目标名> <是否渲染> <变更后是否重启relay>
@@ -473,18 +486,33 @@ elif heal; then
   systemctl is-active --quiet claude-proxy && warn "已安装运行；config.json 需填 baseURL/apiKey/model" || warn "已安装但未运行（检查 config.json）"
 else warn "缺失（可选组件，install 模式自动安装）"; fi
 
-# ---------- 24 relay-tls-proxy（仅 HTTPS 主机，SOFT） ----------
+# ---------- 24 relay-tls-proxy（仅 HTTPS 主机：回环明文健康检查转发 127.0.0.1:8787→8788，SOFT；内容级同步，角色变更随仓库模板自动迁移） ----------
 step "relay-tls-proxy"
 TLS_DIR="$WORKSPACE/shared/secrets/relay-tls"
 if [ ! -f "$TLS_DIR/fullchain.pem" ] || [ ! -f "$TLS_DIR/server.key" ]; then ok "非 HTTPS 主机（无证书），跳过"
-elif [ -f "$UNIT_DIR/relay-tls-proxy.service" ] && systemctl is-active --quiet relay-tls-proxy; then ok
-elif heal; then
-  miss "安装"
-  command -v socat >/dev/null || pkg_install socat
-  cp "$RES_ROOT/relay-service/relay-tls-proxy.service" "$UNIT_DIR/relay-tls-proxy.service" \
-    && systemctl daemon-reload && systemctl enable --now relay-tls-proxy >/dev/null 2>&1
-  systemctl is-active --quiet relay-tls-proxy && ok "已安装" || warn "安装后未运行"
-else warn "有证书但单元缺失/未运行"; fi
+else
+  want="$(cat "$RES_ROOT/relay-service/relay-tls-proxy.service" 2>/dev/null)"
+  have="$(cat "$UNIT_DIR/relay-tls-proxy.service" 2>/dev/null)"
+  if [ -z "$want" ]; then warn "仓库缺 relay-tls-proxy.service 模板"
+  elif [ "$want" != "$have" ]; then
+    if ! heal; then warn "与仓库模板漂移（install 模式自动同步）"
+    else
+      miss "安装/更新单元"
+      command -v socat >/dev/null || pkg_install socat
+      [ -n "$have" ] && cp "$UNIT_DIR/relay-tls-proxy.service" "$UNIT_DIR/relay-tls-proxy.service.provision-bak"
+      printf '%s\n' "$want" > "$UNIT_DIR/relay-tls-proxy.service" && systemctl daemon-reload \
+        && systemctl enable relay-tls-proxy >/dev/null 2>&1
+      systemctl restart relay-tls-proxy
+      systemctl is-active --quiet relay-tls-proxy && ok "已同步+运行" || warn "更新后未运行"
+    fi
+  elif systemctl is-active --quiet relay-tls-proxy; then ok
+  elif heal; then
+    miss "启动"
+    command -v socat >/dev/null || pkg_install socat
+    systemctl enable --now relay-tls-proxy >/dev/null 2>&1
+    systemctl is-active --quiet relay-tls-proxy && ok "已启动" || warn "启动失败"
+  else warn "单元存在但未运行（install 模式自动启动）"; fi
+fi
 
 # ---------- 25 首装引导（无现役 release 时执行 boot.sh boot 完成首次部署） ----------
 step "首装引导"

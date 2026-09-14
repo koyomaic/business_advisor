@@ -176,3 +176,29 @@ def test_delete_user_revokes_devices(relay, admin):
     assert admin.delete("/users/ivan").status_code == 200
     h = _sign(act["device_secret"], act["device_id"], "GET", "/tasks")
     assert httpx.get(base + "/tasks", headers=h, timeout=10).status_code == 401
+
+
+def test_activate_rate_limit(relay, admin, monkeypatch):
+    """A-02 纵深：窗口内同 IP 无效激活码达上限 → 429+Retry-After；解锁后成功激活清零。"""
+    import app.main as m
+    monkeypatch.setattr(m, "ACTIVATE_LOCK_SEC", 1.0)  # 测试用短窗口
+    base = relay["base"]
+    for _ in range(m.ACTIVATE_MAX_FAILS):
+        r = httpx.post(base + "/auth/activate",
+                       json={"token": "ta_invalid_guess", "device_id": "dev-x"},
+                       timeout=10)
+        assert r.status_code == 401
+    # 达上限 → 429（即使换有效码也先被限频拒绝）
+    token = _make_user(admin, "rate")
+    for body in ({"token": "ta_invalid_guess", "device_id": "dev-x"},
+                 {"token": token, "device_id": "dev-y"}):
+        r = httpx.post(base + "/auth/activate", json=body, timeout=10)
+        assert r.status_code == 429
+        assert int(r.headers["retry-after"]) >= 1
+    # 窗口过后自动解锁，有效码正常激活
+    time.sleep(1.1)
+    act = _activate(base, token, "dev-z")
+    assert act["user"] == "rate"
+    # 失败与锁定均留审计痕迹
+    log = (relay["ws"] / "relay.log").read_text(encoding="utf-8")
+    assert "activate_fail" in log and "activate_locked" in log

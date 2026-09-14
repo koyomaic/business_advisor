@@ -132,18 +132,20 @@ def test_login_rate_limit(relay_dash, monkeypatch):
         for _ in range(m.LOGIN_MAX_FAILS):
             r = c.post("/login", data={"password": "wrong"}, follow_redirects=False)
             assert r.status_code == 303 and "/?e=1" in r.headers["location"]
-        # 锁定后即使口令正确也拒绝，且不发会话 cookie
+        # 锁定后即使口令正确也拒绝：429 + Retry-After，且不发会话 cookie
         r = c.post("/login", data={"password": "dash-test-pw"}, follow_redirects=False)
-        assert r.status_code == 303 and "/?e=2" in r.headers["location"]
+        assert r.status_code == 429
+        assert int(r.headers["retry-after"]) >= 1
+        assert "尝试次数过多" in r.text
         assert "relay_dash" not in c.cookies
-        assert "尝试次数过多" in c.get("/?e=2").text
         # 窗口过后自动解锁
         time.sleep(1.1)
         r = c.post("/login", data={"password": "dash-test-pw"}, follow_redirects=False)
         assert r.status_code == 302 and "relay_dash" in c.cookies
-        # 失败留审计痕迹（ip + 累计次数）
+        # 失败与锁定均留审计痕迹（ip + 累计次数）
         log = (relay_dash["ws"] / "relay.log").read_text(encoding="utf-8")
         assert "login_fail" in log and "ip=127.0.0.1" in log
+        assert "login_locked" in log
     finally:
         c.close()
 

@@ -163,6 +163,74 @@ def _symlink_dws_seed(workdir: str, shared_dir: str) -> None:
         pass
 
 
+def _claude_mcp_entry(entry: dict) -> dict:
+    """opencode MCP 条目 → claude .mcp.json 条目。
+
+    local:  {"type":"local","command":[bin,arg...],"environment":{...}}
+            → {"command":bin,"args":[arg...],"env":{...}}
+    remote: {"type":"remote","url":...} → {"type":"http","url":...}
+    无法识别返回 {}（跳过该服务器）。
+    """
+    if not isinstance(entry, dict):
+        return {}
+    et = str(entry.get("type") or "").lower()
+    cmd = entry.get("command")
+    if et == "remote" or (not cmd and entry.get("url")):
+        url = entry.get("url")
+        return {"type": "http", "url": str(url)} if url else {}
+    if isinstance(cmd, str):
+        cmd = [cmd]
+    if not isinstance(cmd, list) or not cmd:
+        return {}
+    out: dict = {"command": str(cmd[0]), "args": [str(a) for a in cmd[1:]]}
+    env = entry.get("environment") or entry.get("env")
+    if isinstance(env, dict) and env:
+        out["env"] = {str(k): str(v) for k, v in env.items()}
+    return out
+
+
+def _prepare_claude(workdir: str, cfg) -> str:
+    """claude 引擎的共享知识注入，返回 XDG 目录（与 opencode 分支同契约）。
+
+    - shared/skills/<name>（含 SKILL.md 者）→ workdir/.claude/skills/<name> 软链
+      （项目级技能，claude 在 cwd 自动发现）
+    - shared/mcp/*.json（opencode 条目格式）→ workdir/.xdg/claude-mcp.json
+      （claude mcpServers 格式，executor 以 --mcp-config 显式加载）
+    - shared/memory/*.md → workdir/CLAUDE.md（claude 项目记忆，cwd 自动加载）
+    - 鉴权/模型不经文件：由 relay.env 的 ANTHROPIC_* 走进程 env 透传；
+      会话态由 executor 设 CLAUDE_CONFIG_DIR 持久化（不在 workdir，躲开终态清理）
+    """
+    xdg = os.path.join(workdir, ".xdg")
+    os.makedirs(xdg, exist_ok=True)
+    os.makedirs(os.path.join(workdir, "home"), exist_ok=True)
+
+    skills_root = os.path.join(cfg.shared_dir, "skills")
+    if os.path.isdir(skills_root):
+        dst_root = os.path.join(workdir, ".claude", "skills")
+        os.makedirs(dst_root, exist_ok=True)
+        for name in sorted(os.listdir(skills_root)):
+            src = os.path.join(skills_root, name)
+            if os.path.isdir(src) and os.path.isfile(os.path.join(src, "SKILL.md")):
+                _sync_symlink(os.path.join(dst_root, name), src)
+
+    servers: dict = {}
+    for name, entry in load_shared_mcp(cfg.shared_dir).items():
+        conv = _claude_mcp_entry(entry)
+        if conv:
+            servers[name] = conv
+    if servers:
+        with open(os.path.join(xdg, "claude-mcp.json"), "w", encoding="utf-8") as f:
+            json.dump({"mcpServers": servers}, f, ensure_ascii=False, indent=2)
+
+    _symlink_dws_seed(workdir, cfg.shared_dir)
+
+    mem = shared_memory_text(cfg.shared_dir)
+    if mem:
+        with open(os.path.join(workdir, "CLAUDE.md"), "w", encoding="utf-8") as f:
+            f.write(mem + "\n")
+    return xdg
+
+
 def prepare_run(workdir: str, cfg) -> str:
     """为本次运行生成隔离的 XDG 配置目录（共享知识注入点），返回新 XDG_CONFIG_HOME。
 
@@ -171,6 +239,8 @@ def prepare_run(workdir: str, cfg) -> str:
     - shared/memory/*.md 拼成 AGENTS.md 写入 workdir 与 home 全局位（双保险加载）
     - dws 凭证种子软链进任务 HOME（全会话共用一份活凭证；种子缺失则跳过）
     """
+    if getattr(cfg, "engine", "opencode") == "claude":
+        return _prepare_claude(workdir, cfg)
     base_xdg = cfg.xdg_config_home or os.path.expanduser("~/.config")
     base_pkg = os.path.join(base_xdg, "opencode")
     xdg = os.path.join(workdir, ".xdg")

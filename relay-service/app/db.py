@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS tasks(
   priority TEXT NOT NULL DEFAULT 'normal',
   status TEXT NOT NULL DEFAULT 'queued',
   session_id TEXT NOT NULL DEFAULT '',
+  engine TEXT NOT NULL DEFAULT '',
   workdir TEXT NOT NULL DEFAULT '',
   result TEXT NOT NULL DEFAULT '',
   error TEXT NOT NULL DEFAULT '',
@@ -74,6 +75,7 @@ PG_SCHEMA = [
       priority TEXT NOT NULL DEFAULT 'normal',
       status TEXT NOT NULL DEFAULT 'queued',
       session_id TEXT NOT NULL DEFAULT '',
+      engine TEXT NOT NULL DEFAULT '',
       workdir TEXT NOT NULL DEFAULT '',
       result TEXT NOT NULL DEFAULT '',
       error TEXT NOT NULL DEFAULT '',
@@ -95,7 +97,7 @@ PG_SCHEMA = [
 
 TASK_FIELDS = {
     "user", "description", "project", "targets", "priority", "status",
-    "session_id", "workdir", "result", "error", "changed_files",
+    "session_id", "engine", "workdir", "result", "error", "changed_files",
     "conflicts", "tokens", "cost", "resume_from", "blocked_cmd", "resume_hint", "read_only",
     "started_at", "finished_at",
 }
@@ -143,7 +145,8 @@ class DB:
                 cols = {r[1] for r in self._conn.execute("PRAGMA table_info(tasks)")}
                 for name, decl in (("blocked_cmd", "TEXT NOT NULL DEFAULT ''"),
                                    ("resume_hint", "TEXT NOT NULL DEFAULT ''"),
-                                   ("read_only", "INTEGER NOT NULL DEFAULT 0")):
+                                   ("read_only", "INTEGER NOT NULL DEFAULT 0"),
+                                   ("engine", "TEXT NOT NULL DEFAULT ''")):
                     if name not in cols:
                         self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
                 ucols = {r[1] for r in self._conn.execute("PRAGMA table_info(users)")}
@@ -170,7 +173,8 @@ class DB:
         cols = {r["column_name"] for r in rows}
         for name, decl in (("blocked_cmd", "TEXT NOT NULL DEFAULT ''"),
                            ("resume_hint", "TEXT NOT NULL DEFAULT ''"),
-                           ("read_only", "BOOLEAN NOT NULL DEFAULT FALSE")):
+                           ("read_only", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                           ("engine", "TEXT NOT NULL DEFAULT ''")):
             if name not in cols:
                 self._run(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
         rows, _ = self._run("SELECT column_name FROM information_schema.columns"

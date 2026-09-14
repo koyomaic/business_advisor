@@ -1,0 +1,331 @@
+"""claude 引擎支持：命令构建、环境隔离、共享知识注入、会话守卫与 e2e 假 agent 全流程。
+
+opencode 既有行为由原有测试文件守护（本文件不重复）；此处仅断言 opencode 分支
+不受 claude 改动污染的关键点。
+"""
+from __future__ import annotations
+
+import json
+import os
+import time
+
+import httpx
+import pytest
+
+from app.config import Settings
+from app.db import DB
+from app.executor import Executor, _parse_claude, _state_dirname
+from app.main import _session_if_same_engine
+from app.shared_knowledge import _claude_mcp_entry, prepare_run
+
+from conftest import submit, wait_task
+
+
+def _cfg(tmp_path, engine: str = "claude", model: str = "") -> Settings:
+    return Settings(
+        db_path=str(tmp_path / "relay.db"),
+        workspace_root=str(tmp_path),
+        shared_dir=str(tmp_path / "shared"),
+        task_root=str(tmp_path / "tasks"),
+        users_root=str(tmp_path / "users"),
+        engine=engine,
+        model=model,
+    )
+
+
+# ---- build_cmd ----
+
+def test_build_cmd_claude_flags(tmp_path):
+    ex = Executor(_cfg(tmp_path, model="Qwen3.8-27B-FP8-LCBD"))
+    cmd = ex.build_cmd(str(tmp_path), "do it", None)
+    assert cmd[1] == "-p" and cmd[2] == "do it"
+    assert "--output-format" in cmd and "stream-json" in cmd
+    assert "--dangerously-skip-permissions" in cmd
+    assert cmd[cmd.index("--model") + 1] == "Qwen3.8-27B-FP8-LCBD"
+    assert "--resume" not in cmd
+
+
+def test_build_cmd_claude_resume_and_mcp(tmp_path):
+    ex = Executor(_cfg(tmp_path))
+    xdg = tmp_path / ".xdg"
+    xdg.mkdir()
+    (xdg / "claude-mcp.json").write_text("{}")
+    cmd = ex.build_cmd(str(tmp_path), "p", "ses_1")
+    assert cmd[cmd.index("--resume") + 1] == "ses_1"
+    assert cmd[cmd.index("--mcp-config") + 1] == str(xdg / "claude-mcp.json")
+    assert "--strict-mcp-config" in cmd
+    assert "--model" not in cmd  # cfg.model 为空则不传，走 ANTHROPIC_MODEL
+
+
+def test_build_cmd_opencode_untouched(tmp_path):
+    ex = Executor(_cfg(tmp_path, engine="opencode", model="m1"))
+    cmd = ex.build_cmd(str(tmp_path), "p", "ses_x")
+    assert cmd[1] == "run" and "--auto" in cmd
+    assert cmd[cmd.index("-m") + 1] == "m1"
+    assert cmd[cmd.index("-s") + 1] == "ses_x"
+    for flag in ("--dangerously-skip-permissions", "--output-format", "--mcp-config"):
+        assert flag not in cmd
+
+
+# ---- build_env ----
+
+def test_build_env_claude_sandbox_and_state(tmp_path):
+    cfg = _cfg(tmp_path)
+    ex = Executor(cfg)
+    workdir = str(tmp_path / "wd")
+    env = ex.build_env(workdir, None, user="王洪彬")
+    assert env["IS_SANDBOX"] == "1"
+    assert env["CLAUDE_CONFIG_DIR"] == os.path.join(cfg.users_root, "王洪彬", ".claude")
+    assert os.path.isdir(env["CLAUDE_CONFIG_DIR"])
+    assert env["HOME"] == os.path.join(workdir, "home")
+
+
+def test_build_env_claude_user_sanitized(tmp_path):
+    cfg = _cfg(tmp_path)
+    ex = Executor(cfg)
+    env = ex.build_env(str(tmp_path / "wd"), None, user="../../etc")
+    state = os.path.normpath(env["CLAUDE_CONFIG_DIR"])
+    assert state.startswith(os.path.normpath(cfg.users_root) + os.sep), \
+        "恶意用户名不得逃逸 users_root"
+
+
+def test_build_env_opencode_no_claude_vars(tmp_path):
+    ex = Executor(_cfg(tmp_path, engine="opencode"))
+    env = ex.build_env(str(tmp_path / "wd"), None, user="u")
+    assert "IS_SANDBOX" not in env and "CLAUDE_CONFIG_DIR" not in env
+
+
+def test_state_dirname():
+    assert _state_dirname("") == "default"
+    assert _state_dirname("..") == "default"
+    assert _state_dirname("a/b") == "a_b"
+    assert _state_dirname("王洪彬") == "王洪彬"
+
+
+# ---- _parse_claude ----
+
+def test_parse_claude_events():
+    sys_ev = json.dumps({"type": "system", "subtype": "init", "session_id": "s1"})
+    assert _parse_claude(sys_ev) == {"session_id": "s1"}
+
+    asst = json.dumps({"type": "assistant", "session_id": "s1", "message": {"content": [
+        {"type": "text", "text": "hi"},
+        {"type": "tool_use", "name": "Bash", "input": {"command": "rm -rf /root"}},
+    ]}})
+    out = _parse_claude(asst)
+    assert out["text"] == "hi"
+    assert out["agent_event"]["kind"] == "tool"
+
+    tool_only = json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Bash", "input": {"command": "ls /"}},
+    ]}})
+    assert _parse_claude(tool_only)["tool_cmd"] == "ls /"
+
+    res = json.dumps({"type": "result", "subtype": "success", "session_id": "s2",
+                      "result": "final answer", "total_cost_usd": 0.002,
+                      "usage": {"input_tokens": 10, "output_tokens": 5}})
+    out = _parse_claude(res)
+    assert out["text_final"] == "final answer"
+    assert "text" not in out  # result 不追加，避免与流式 text 重复
+    assert out["tokens"] == 15 and out["cost"] == 0.002 and out["session_id"] == "s2"
+
+    assert _parse_claude("not json") is None
+
+
+# ---- MCP 条目转换 ----
+
+def test_claude_mcp_entry_local():
+    e = _claude_mcp_entry({"type": "local", "command": ["python3", "a.py"],
+                           "environment": {"K": "V"}})
+    assert e == {"command": "python3", "args": ["a.py"], "env": {"K": "V"}}
+
+
+def test_claude_mcp_entry_local_str_command():
+    assert _claude_mcp_entry({"type": "local", "command": "node"}) == \
+        {"command": "node", "args": []}
+
+
+def test_claude_mcp_entry_remote():
+    assert _claude_mcp_entry({"type": "remote", "url": "http://b"}) == \
+        {"type": "http", "url": "http://b"}
+
+
+def test_claude_mcp_entry_invalid():
+    assert _claude_mcp_entry({"type": "local"}) == {}
+    assert _claude_mcp_entry("x") == {}
+
+
+# ---- prepare_run claude 分支 ----
+
+class _Cfg:
+    def __init__(self, shared_dir: str, engine: str = "claude"):
+        self.shared_dir = shared_dir
+        self.engine = engine
+        self.xdg_config_home = ""
+        self.relay_exclude_providers = []
+
+
+def test_prepare_run_claude_injects(tmp_path):
+    sh = tmp_path / "shared"
+    (sh / "skills" / "good").mkdir(parents=True)
+    (sh / "skills" / "good" / "SKILL.md").write_text("# good")
+    (sh / "skills" / "noskill").mkdir()          # 无 SKILL.md → 不注入
+    (sh / "mcp").mkdir()
+    (sh / "mcp" / "alpha.json").write_text(
+        json.dumps({"type": "local", "command": ["python3", "a.py"]}))
+    (sh / "memory").mkdir()
+    (sh / "memory" / "m1.md").write_text("# 记忆内容")
+    workdir = tmp_path / "wd"
+    workdir.mkdir()
+
+    xdg = prepare_run(str(workdir), _Cfg(str(sh)))
+    assert xdg == str(workdir / ".xdg")
+
+    link = workdir / ".claude" / "skills" / "good"
+    assert link.is_symlink() and os.path.isfile(link / "SKILL.md")
+    assert not (workdir / ".claude" / "skills" / "noskill").exists()
+
+    mcp = json.loads((workdir / ".xdg" / "claude-mcp.json").read_text())
+    assert mcp == {"mcpServers": {"alpha": {"command": "python3", "args": ["a.py"]}}}
+
+    assert "记忆内容" in (workdir / "CLAUDE.md").read_text()
+    assert not (workdir / ".xdg" / "opencode").exists()  # 不写 opencode 配置
+    assert not (workdir / "AGENTS.md").exists()
+    assert (workdir / "home").is_dir()
+
+
+def test_prepare_run_claude_empty_shared(tmp_path):
+    sh = tmp_path / "shared"
+    sh.mkdir()
+    workdir = tmp_path / "wd"
+    workdir.mkdir()
+    prepare_run(str(workdir), _Cfg(str(sh)))
+    assert not (workdir / ".xdg" / "claude-mcp.json").exists()
+    assert not (workdir / "CLAUDE.md").exists()
+
+
+def test_prepare_run_opencode_stub_untouched(tmp_path):
+    """无 engine 属性的旧 stub（默认 opencode）仍走 opencode 分支。"""
+    class _Old:
+        def __init__(self, shared_dir):
+            self.shared_dir = shared_dir
+            self.xdg_config_home = ""
+            self.relay_exclude_providers = []
+
+    sh = tmp_path / "shared"
+    (sh / "memory").mkdir(parents=True)
+    (sh / "memory" / "m.md").write_text("mem")
+    workdir = tmp_path / "wd"
+    workdir.mkdir()
+    xdg = prepare_run(str(workdir), _Old(str(sh)))
+    assert os.path.isfile(os.path.join(xdg, "opencode", "opencode.json"))
+    assert (workdir / "AGENTS.md").exists()
+
+
+# ---- 会话同引擎守卫 ----
+
+def test_session_if_same_engine():
+    row = {"session_id": "s1", "engine": "claude"}
+    assert _session_if_same_engine(row, "claude") == "s1"
+    assert _session_if_same_engine(row, "opencode") is None
+    legacy = {"session_id": "s2", "engine": ""}
+    assert _session_if_same_engine(legacy, "opencode") == "s2"
+    assert _session_if_same_engine(legacy, "claude") is None
+    assert _session_if_same_engine({"session_id": "", "engine": "claude"}, "claude") is None
+    assert _session_if_same_engine(None, "claude") is None
+
+
+# ---- db engine 列 ----
+
+def test_db_engine_column(tmp_path):
+    db = DB(str(tmp_path / "t.db"))
+    tid = db.create_task(user="u", description="d")
+    assert db.task(tid)["engine"] == ""
+    db.set(tid, engine="claude", session_id="s1")
+    row = db.task(tid)
+    assert row["engine"] == "claude" and row["session_id"] == "s1"
+
+
+# ---- e2e：假 claude agent 全流程（拦截→审批→续跑） ----
+
+FAKE_CLAUDE = """#!/bin/sh
+# 假 claude：首跑发出命中高危模式的 tool_use 后被杀；续跑（prompt 含“人工已批准”）直接 done。
+if printf '%s' "$*" | grep -q "人工已批准"; then
+  printf '%s\\n' '{"type":"system","subtype":"init","session_id":"ses_claude_fake"}'
+  printf '%s\\n' '{"type":"assistant","session_id":"ses_claude_fake","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}'
+  printf '%s\\n' '{"type":"result","subtype":"success","session_id":"ses_claude_fake","result":"done","total_cost_usd":0.002,"usage":{"input_tokens":10,"output_tokens":5}}'
+  exit 0
+fi
+printf '%s\\n' '{"type":"system","subtype":"init","session_id":"ses_claude_fake"}'
+printf '%s\\n' '{"type":"assistant","session_id":"ses_claude_fake","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"rm -rf /root"}}]}}'
+sleep 20
+"""
+
+
+def _wait_pending(base: str, tok: str, tid: int, timeout: float = 60) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r = httpx.get(f"{base}/tasks/{tid}", headers={"Authorization": f"Bearer {tok}"},
+                      timeout=10)
+        t = r.json()
+        if t["status"] == "pending_approval":
+            return t
+        if t["status"] in ("done", "review", "conflict", "failed", "cancelled"):
+            return t
+        time.sleep(0.5)
+    raise TimeoutError(f"task {tid} 未进入 pending_approval")
+
+
+def test_claude_engine_e2e_blocked_approve_resume(relay_factory, tmp_path):
+    script = tmp_path / "fake_claude.sh"
+    script.write_text(FAKE_CLAUDE)
+    script.chmod(0o755)
+    r = relay_factory(engine="claude", agent_bin=str(script), task_timeout=60)
+    base = r["base"]
+    admin_c = httpx.Client(base_url=base, headers={"Authorization": "Bearer admin-test"},
+                           timeout=30)
+    tok = admin_c.post("/users", json={"name": "claudeuser"}).json()["token"]
+
+    assert admin_c.get("/health").json()["engine"] == "claude"
+
+    tid = submit(base, tok, "删除某个临时目录")["task_id"]
+    t = _wait_pending(base, tok, tid, timeout=55)
+    assert t["status"] == "pending_approval", t
+    assert t["blocked_cmd"] == "rm -rf /root", t
+    # 首跑（被杀前）也应已落 session 与 engine
+    assert t["session_id"] == "ses_claude_fake", t
+    assert t["engine"] == "claude", t
+
+    r2 = admin_c.post(f"/tasks/{tid}/approve", json={"decision": "approve"})
+    assert r2.status_code == 200, r2.text
+    t = wait_task(base, tok, tid, timeout=60)
+    assert t["status"] in ("review", "done"), t
+    assert t["session_id"] == "ses_claude_fake"
+    assert t["engine"] == "claude"
+    assert t["tokens"] == 15, "result.usage 应计入 tokens"
+    assert t["result"] == "done", "result 事件应替换而非追加流式 text"
+    assert t["resume_hint"] == ""
+
+    # claude 状态目录持久化在 users/<user>/.claude（不随任务 workdir 清理）
+    state = os.path.join(r["cfg"].users_root, "claudeuser", ".claude")
+    assert os.path.isdir(state)
+
+
+def test_claude_engine_e2e_plain_task(relay_factory, tmp_path):
+    """无拦截路径：直接跑完，engine 落库。"""
+    script = tmp_path / "fake_claude2.sh"
+    script.write_text("""#!/bin/sh
+printf '%s\\n' '{"type":"system","subtype":"init","session_id":"ses_c2"}'
+printf '%s\\n' '{"type":"result","subtype":"success","session_id":"ses_c2","result":"all good","total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":2}}'
+exit 0
+""")
+    script.chmod(0o755)
+    r = relay_factory(engine="claude", agent_bin=str(script), task_timeout=60)
+    base = r["base"]
+    admin_c = httpx.Client(base_url=base, headers={"Authorization": "Bearer admin-test"},
+                           timeout=30)
+    tok = admin_c.post("/users", json={"name": "c2"}).json()["token"]
+    tid = submit(base, tok, "随便干点什么")["task_id"]
+    t = wait_task(base, tok, tid, timeout=60)
+    assert t["status"] in ("review", "done"), t
+    assert t["result"] == "all good" and t["engine"] == "claude" and t["tokens"] == 3

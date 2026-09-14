@@ -346,6 +346,19 @@ READ_ONLY_MARKERS = ("只读", "read-only", "read only", "readonly")
 def _declares_read_only(description: str) -> bool:
     d = (description or "").lower()
     return any(m in d for m in READ_ONLY_MARKERS)
+
+
+def _session_if_same_engine(task_row: dict | None, engine: str) -> str | None:
+    """仅当历史任务由当前引擎执行时才复用其 session_id（会话格式不跨引擎）。
+
+    存量行 engine 为空 → 历史上只有 opencode 在跑，按 opencode 归属。
+    """
+    if not task_row:
+        return None
+    sid = task_row.get("session_id") or None
+    if not sid:
+        return None
+    return sid if (task_row.get("engine") or "opencode") == engine else None
 from .workspace import Workspace
 
 
@@ -519,13 +532,13 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         self_resume = bool(row.get("resume_hint"))
         if self_resume:
             reuse_workdir = row.get("workdir") or None
-            resume_session = row.get("session_id") or None
+            resume_session = _session_if_same_engine(row, cfg.engine)
             data_dir = os.path.join(row["workdir"], "data") if row.get("workdir") else None
             prompt = row["resume_hint"]
             exempt_cmd = row.get("blocked_cmd") or None
         else:
             reuse_workdir = prev["workdir"] if (prev and prev.get("workdir")) else None
-            resume_session = (prev.get("session_id") or None) if prev else None
+            resume_session = _session_if_same_engine(prev, cfg.engine)
             data_dir = os.path.join(prev["workdir"], "data") if (prev and prev.get("workdir")) else None
             prompt = build_prompt(row, cfg)
             exempt_cmd = None
@@ -544,10 +557,12 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             cancel=cancel,
             publish=bus.publish,
             exempt_cmd=exempt_cmd,
+            user=row["user"],
         )
         finished = time.time()
         db.set(task_id,
                session_id=res.session_id or "",
+               engine=cfg.engine,
                result=res.text[-4000:],
                tokens=res.tokens,
                cost=res.cost,

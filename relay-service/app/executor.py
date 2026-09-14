@@ -80,11 +80,17 @@ def _parse_claude(line: str) -> dict | None:
                     if isinstance(cmd, str) and cmd.strip():
                         out["tool_cmd"] = cmd
     elif et == "result":
-        out["text"] = out.get("text", "") + (ev.get("result") or "")
+        # result 事件携带完整最终文本（与流式 assistant text 重复），整体替换而非追加
+        if ev.get("result"):
+            out["text_final"] = ev["result"]
         if ev.get("total_cost_usd"):
             out["cost"] = float(ev["total_cost_usd"])
         if ev.get("session_id"):
             out["session_id"] = ev["session_id"]
+        usage = ev.get("usage") or {}
+        tok = int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
+        if tok:
+            out["tokens"] = tok
     return out or None
 
 
@@ -123,6 +129,14 @@ _DWS_GROUP_FLAGS = {
 _DWS_NON_TARGET_FLAGS = {("ding", "message", "send-by-message"): {"--group"}}
 
 
+def _state_dirname(user: str) -> str:
+    """把用户名安全化为持久状态目录名（防路径穿越；允许中文，Linux 目录名无碍）。"""
+    u = (user or "").replace("\x00", "").replace("/", "_").strip()
+    if u in ("", ".", ".."):
+        return "default"
+    return u
+
+
 class Executor:
     """以无头方式驱动 agent CLI（opencode / claude），逐行解析 JSON 事件流。"""
 
@@ -143,26 +157,44 @@ class Executor:
                 cmd += ["-s", resume_session]
             cmd.append(prompt)
             return cmd
-        cmd = [self._bin(), "-p", prompt, "--output-format", "stream-json", "--verbose"]
+        # claude：headless 无审批交互，工具放行统一由本执行器的流式门控兜底
+        # （blocked_patterns / dws 二次确认 / rm 白名单），语义对齐 opencode --auto。
+        cmd = [self._bin(), "-p", prompt, "--output-format", "stream-json",
+               "--verbose", "--dangerously-skip-permissions"]
+        if self.cfg.model:
+            cmd += ["--model", self.cfg.model]
         if resume_session:
             cmd += ["--resume", resume_session]
+        mcp_cfg = os.path.join(workdir, ".xdg", "claude-mcp.json")
+        if os.path.isfile(mcp_cfg):
+            cmd += ["--mcp-config", mcp_cfg, "--strict-mcp-config"]
         return cmd
 
-    def build_env(self, workdir: str, xdg_config: str | None = None) -> dict:
+    def build_env(self, workdir: str, xdg_config: str | None = None,
+                  user: str = "") -> dict:
         env = dict(os.environ)
         env["HOME"] = os.path.join(workdir, "home")
         env["XDG_CONFIG_HOME"] = (xdg_config or self.cfg.xdg_config_home
                                   or os.path.expanduser("~/.config"))
         env["XDG_DATA_HOME"] = os.path.join(workdir, "data")
+        if self.cfg.engine == "claude":
+            # root 下 claude 拒绝 --dangerously-skip-permissions，须声明沙箱环境；
+            # 任务 HOME 本就物理隔离（workdir/home），语义相符。
+            env["IS_SANDBOX"] = "1"
+            # 会话/信任态放持久目录（users/<user>/.claude），躲开终态清理删 home/，
+            # 跨任务 --resume 才可用；鉴权与模型走 relay.env 的 ANTHROPIC_* 透传。
+            state = os.path.join(self.cfg.users_root, _state_dirname(user), ".claude")
+            os.makedirs(state, exist_ok=True)
+            env["CLAUDE_CONFIG_DIR"] = state
         return env
 
     async def run(self, *, task_id: int, workdir: str, prompt: str,
                   resume_session: str | None, data_dir: str | None,
                   cancel: asyncio.Event, publish,
-                  exempt_cmd: str | None = None) -> AgentResult:
-        cmd = self.build_cmd(workdir, prompt, resume_session)
+                  exempt_cmd: str | None = None, user: str = "") -> AgentResult:
         xdg = shared_knowledge.prepare_run(workdir, self.cfg)
-        env = self.build_env(workdir, xdg)
+        cmd = self.build_cmd(workdir, prompt, resume_session)
+        env = self.build_env(workdir, xdg, user)
         if data_dir:
             env["XDG_DATA_HOME"] = data_dir
         proc = await asyncio.create_subprocess_exec(
@@ -206,7 +238,10 @@ class Executor:
                     continue
                 if parsed.get("session_id"):
                     res.session_id = parsed["session_id"]
-                res.text += parsed.get("text", "")
+                if parsed.get("text_final"):
+                    res.text = parsed["text_final"]
+                else:
+                    res.text += parsed.get("text", "")
                 res.tokens += parsed.get("tokens", 0)
                 res.cost += parsed.get("cost", 0.0)
                 if parsed.get("agent_event"):

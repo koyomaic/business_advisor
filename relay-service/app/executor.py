@@ -168,6 +168,11 @@ class Executor:
         mcp_cfg = os.path.join(workdir, ".xdg", "claude-mcp.json")
         if os.path.isfile(mcp_cfg):
             cmd += ["--mcp-config", mcp_cfg, "--strict-mcp-config"]
+        # 系统级提示词（高管工作法）：append 附加在默认系统提示词之后，
+        # 文件缺失则不注入（不阻断任务）。
+        sys_prompt = os.path.join(self.cfg.workspace_root, "CEO_PROMPT.md")
+        if os.path.isfile(sys_prompt):
+            cmd += ["--append-system-prompt-file", sys_prompt]
         return cmd
 
     def build_env(self, workdir: str, xdg_config: str | None = None,

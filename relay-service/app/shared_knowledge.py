@@ -224,10 +224,20 @@ def _prepare_claude(workdir: str, cfg) -> str:
 
     _symlink_dws_seed(workdir, cfg.shared_dir)
 
+    # 团队约定（workspace/AGENTS.md：dws 用法/共享区规则/拦截边界）+ 团队记忆
+    # 合并进 CLAUDE.md，claude 在 cwd 自动加载——与 opencode 引擎的 AGENTS.md 约定对齐。
+    parts = []
+    agents = os.path.join(cfg.workspace_root, "AGENTS.md") \
+        if cfg.workspace_root else ""
+    if agents and os.path.isfile(agents):
+        with open(agents, encoding="utf-8") as f:
+            parts.append(f.read().rstrip() + "\n")
     mem = shared_memory_text(cfg.shared_dir)
     if mem:
+        parts.append(mem.rstrip() + "\n")
+    if parts:
         with open(os.path.join(workdir, "CLAUDE.md"), "w", encoding="utf-8") as f:
-            f.write(mem + "\n")
+            f.write("\n".join(parts))
     return xdg
 
 

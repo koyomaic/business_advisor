@@ -158,11 +158,13 @@ def test_claude_mcp_entry_invalid():
 # ---- prepare_run claude 分支 ----
 
 class _Cfg:
-    def __init__(self, shared_dir: str, engine: str = "claude"):
+    def __init__(self, shared_dir: str, engine: str = "claude",
+                 workspace_root: str = ""):
         self.shared_dir = shared_dir
         self.engine = engine
         self.xdg_config_home = ""
         self.relay_exclude_providers = []
+        self.workspace_root = workspace_root
 
 
 def test_prepare_run_claude_injects(tmp_path):
@@ -175,10 +177,13 @@ def test_prepare_run_claude_injects(tmp_path):
         json.dumps({"type": "local", "command": ["python3", "a.py"]}))
     (sh / "memory").mkdir()
     (sh / "memory" / "m1.md").write_text("# 记忆内容")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "AGENTS.md").write_text("# 团队约定\n- dws 用法")
     workdir = tmp_path / "wd"
     workdir.mkdir()
 
-    xdg = prepare_run(str(workdir), _Cfg(str(sh)))
+    xdg = prepare_run(str(workdir), _Cfg(str(sh), workspace_root=str(ws)))
     assert xdg == str(workdir / ".xdg")
 
     link = workdir / ".claude" / "skills" / "good"
@@ -188,7 +193,9 @@ def test_prepare_run_claude_injects(tmp_path):
     mcp = json.loads((workdir / ".xdg" / "claude-mcp.json").read_text())
     assert mcp == {"mcpServers": {"alpha": {"command": "python3", "args": ["a.py"]}}}
 
-    assert "记忆内容" in (workdir / "CLAUDE.md").read_text()
+    claude_md = (workdir / "CLAUDE.md").read_text()
+    assert "记忆内容" in claude_md
+    assert "团队约定" in claude_md  # workspace AGENTS.md 并入
     assert not (workdir / ".xdg" / "opencode").exists()  # 不写 opencode 配置
     assert not (workdir / "AGENTS.md").exists()
     assert (workdir / "home").is_dir()

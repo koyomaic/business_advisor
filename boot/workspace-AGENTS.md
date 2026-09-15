@@ -27,7 +27,7 @@
 
 ## 共享知识（取消隔离，个人上传即全员可用）
 
-- `shared/skills/`：团队技能，已自动加载进你的技能列表，直接按技能名使用。其中**基础技能**（人为标记入库到 git 仓库 `skills/` 目录的；当前：jingbowiki-api、钉钉套件 dingtalk-*（安装位 `/root/.agents/skills`）、dws（`/opt/team/skills`）及 shared 内 dingtalk-* 技能；安装位由技能内 `.dest` 文件指定，缺省 shared/skills）以 git 为真源：改动务必提交回仓库，否则夜间体检（provision）会以仓库版覆盖本机改动（旧版备份 `*.bak-provision-*`）；未入库的本地/实验技能不受此限
+- `shared/skills/`：团队技能，已自动加载，按技能名直接用。其中**基础技能**（入库到 git `skills/` 的，安装位由技能内 `.dest` 指定，缺省 shared/skills）以 git 为真源：改动须提交回仓库，否则夜间 provision 以仓库版覆盖本机改动（旧版备份 `*.bak-provision-*`）；未入库的本地/实验技能不受限
 - `shared/mcp/`：团队 MCP 工具服务器，已自动接入，把它们的工具当普通工具调用
 - `shared/memory/`：团队记忆，已自动并入本 AGENTS.md
 - 三类内容任何人上传后，下一个任务即全员生效，无需重启

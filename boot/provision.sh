@@ -364,6 +364,13 @@ if [ -f "$WORKSPACE/AGENTS.md" ]; then ok
 elif heal && [ -f "$RES_ROOT/boot/workspace-AGENTS.md" ] && cp "$RES_ROOT/boot/workspace-AGENTS.md" "$WORKSPACE/AGENTS.md"; then ok "已从仓库模板安装"
 else warn "缺失且无模板"; fi
 
+# ---------- 21a 系统级提示词 CEO_PROMPT.md（claude 引擎 --append-system-prompt-file 注入） ----------
+# 与 AGENTS.md 同模式：缺失则从仓库模板自愈，已有不覆盖（本机可演进，仓库为兜底基线）。
+step "workspace CEO_PROMPT.md"
+if [ -f "$WORKSPACE/CEO_PROMPT.md" ]; then ok
+elif heal && [ -f "$RES_ROOT/boot/CEO_PROMPT.md" ] && cp "$RES_ROOT/boot/CEO_PROMPT.md" "$WORKSPACE/CEO_PROMPT.md"; then ok "已从仓库模板安装"
+else warn "缺失且无模板（claude 引擎将不注入系统提示词）"; fi
+
 # ---------- 21b 基础技能（人为标记入库到仓库 skills/ 的机队共享技能；git 为真源） ----------
 # 只有仓库 skills/ 里存在的技能才检查/同步（入库即标记）；各安装位下其余本地/实验技能不碰。
 # 安装位：技能目录内 .dest 文件（单行绝对路径）指定目标父目录；无 .dest → 默认 $WORKSPACE/shared/skills。

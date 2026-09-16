@@ -9,11 +9,11 @@
 
 ```
 relay-service/
-├── app/                 # FastAPI 服务（config/db/targets/events/audit/workspace/executor/scheduler/main/entry）
+├── app/                 # FastAPI 服务（config/db/targets/events/audit/workspace/executor/scheduler/main/entry/serve）
 ├── tests/               # 61 个测试（单测 + 真实 opencode 端到端）
 ├── team_agent.py        # CLI 客户端
-├── relay.service        # systemd unit
 └── requirements.txt
+# systemd unit 真源在仓库 boot/relay.service.template（provision.sh 渲染 __CURRENT_LINK__/__WORKSPACE__/__VENV__ 占位符后落到 /etc/systemd/system/relay.service），本目录不再存放副本
 
 运行时数据（非系统盘）：
 /mnt/vol-eltaah12/workspace/
@@ -92,13 +92,13 @@ systemd 按序加载，**后者覆盖前者**：
 ## 启动
 
 ```bash
-# systemd（生产）
-sudo cp relay.service /etc/systemd/system/ && sudo systemctl daemon-reload
-sudo systemctl enable --now relay && systemctl status relay
+# systemd（生产）：unit 由 provision.sh 从 boot/relay.service.template 渲染同步，无需手工拷贝
+#   首次装机 / 重新生成 unit：bash <release>/boot/provision.sh install
+#   之后 systemctl enable --now relay && systemctl status relay
 
-# 手动（调试）
+# 手动（调试）：app.serve 按 RELAY_TLS_DIR 证书存在性自听 TLS:8788 或明文:8787
 set -a && . /mnt/vol-eltaah12/workspace/relay.env && set +a
-python -m uvicorn app.entry:app --host 127.0.0.1 --port 8787
+python -m app.serve
 ```
 
 ## 使用（CLI）

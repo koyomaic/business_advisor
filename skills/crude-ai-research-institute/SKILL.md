@@ -30,14 +30,17 @@ description: "调用正式环境原油AI研究院（OpenAI 兼容 chat/completio
 
 ```
 HERMES_API_TOKEN=...      # Bearer token（必填）
-HERMES_SESSION_KEY=...    # 会话密钥/用户标识（必填）
+HERMES_SESSION_KEY=...    # 会话密钥/用户标识（必填；默认发起用户一卡通号）
 HERMES_BASE_URL=...       # 服务地址（必填，如 http://10.189.7.30:8642）
 HERMES_SESSION_ID=...     # 默认会话 ID（可选，不传则每次自动生成 uuid）
+HERMES_SESSION_MAP=...    # 可选：用户名→一卡通号 JSON 映射，配合 RELAY_TASK_USER 自动归属
 ```
 
 也可用 CLI 参数覆盖：`--token` / `--session-key` / `--base-url` / `--session-id`。
 
-relay 机队机器上，三个必填变量已通过 `workspace/relay.env`（systemd `EnvironmentFile`）预注入任务进程环境：relay 任务内无需手动 export，直接调用即可。凭据真值只存于各机 relay.env（600），不进 git。`HERMES_SESSION_KEY` 为本大脑配置的默认发起用户一卡通号；需按具体用户归属调用时用 `--session-key <一卡通号>` 覆盖。
+relay 机队机器上，必填变量已通过 `workspace/relay.env`（systemd `EnvironmentFile`）预注入任务进程环境：relay 任务内无需手动 export，直接调用即可。凭据真值只存于各机 relay.env（600），不进 git。
+
+**会话密钥按终端身份自动归属**：relay 执行器会向任务环境注入 `RELAY_TASK_USER`（=任务归属用户）；脚本解析顺序为 `--session-key` > `HERMES_SESSION_MAP[RELAY_TASK_USER]`（用户名→一卡通号映射，存于 relay.env）> `HERMES_SESSION_KEY`（本机默认发起用户一卡通号）。机器账号（如白露）无工号、不入映射，自动回落默认值；需临时指定归属时仍可用 `--session-key <一卡通号>` 覆盖。
 
 ## 命令
 

@@ -191,6 +191,10 @@ class Executor:
         env["XDG_CONFIG_HOME"] = (xdg_config or self.cfg.xdg_config_home
                                   or os.path.expanduser("~/.config"))
         env["XDG_DATA_HOME"] = os.path.join(workdir, "data")
+        if user:
+            # 任务归属用户（终端身份）：供下游技能按发起人归属外部调用
+            # （如 crude-ai-research-institute 以 HERMES_SESSION_MAP 映射一卡通号）
+            env["RELAY_TASK_USER"] = user
         if self.cfg.engine == "claude":
             # root 下 claude 拒绝 --dangerously-skip-permissions，须声明沙箱环境；
             # 任务 HOME 本就物理隔离（workdir/home），语义相符。

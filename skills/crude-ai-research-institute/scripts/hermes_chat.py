@@ -7,8 +7,11 @@
 凭证只从环境变量读取，不读任何 .env 文件：
   HERMES_API_TOKEN    Bearer token（必填）
   HERMES_BASE_URL     服务地址（必填，如 http://10.189.7.30:8642）
-  HERMES_SESSION_KEY  会话密钥 / 用户标识（必填）
+  HERMES_SESSION_KEY  会话密钥 / 用户标识（必填；默认发起用户一卡通号）
   HERMES_SESSION_ID   默认会话 ID（可选，不传则每次自动生成 uuid）
+  HERMES_SESSION_MAP  可选：用户名→一卡通号 JSON 映射；配合 relay 执行器注入的
+                      RELAY_TASK_USER（任务归属用户）自动按终端身份归属会话密钥，
+                      未命中回落 HERMES_SESSION_KEY。
 """
 import argparse
 import json
@@ -26,6 +29,22 @@ DEFAULT_MODEL = "hermes-agent"
 def load_env_value(key: str):
     val = os.environ.get(key)
     return val.strip() if val and val.strip() else None
+
+
+def mapped_session_key():
+    """按终端身份归属会话密钥：RELAY_TASK_USER（relay 执行器注入的任务归属用户）
+    在 HERMES_SESSION_MAP（用户名→一卡通号 JSON）中命中则返回对应一卡通号；
+    未配置、未命中或解析失败返回 None（回落 HERMES_SESSION_KEY）。"""
+    task_user = load_env_value("RELAY_TASK_USER")
+    map_json = load_env_value("HERMES_SESSION_MAP")
+    if not task_user or not map_json:
+        return None
+    try:
+        mapping = json.loads(map_json)
+    except json.JSONDecodeError:
+        return None
+    val = mapping.get(task_user) if isinstance(mapping, dict) else None
+    return val.strip() if isinstance(val, str) and val.strip() else None
 
 
 def parse_sse_stream(resp):
@@ -127,7 +146,8 @@ def main():
 
     args.token = args.token or load_env_value("HERMES_API_TOKEN")
     args.base_url = args.base_url or load_env_value("HERMES_BASE_URL")
-    args.session_key = args.session_key or load_env_value("HERMES_SESSION_KEY")
+    args.session_key = (args.session_key or mapped_session_key()
+                        or load_env_value("HERMES_SESSION_KEY"))
     if not args.session_id:
         args.session_id = load_env_value("HERMES_SESSION_ID") or str(uuid.uuid4())
 

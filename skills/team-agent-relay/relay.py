@@ -12,8 +12,8 @@
   python3 relay.py tasks [--status S] [--limit N]
   python3 relay.py stream <id> [--timeout 600]
   python3 relay.py diff <id>
-  python3 relay.py upload <本地文件> <共享区相对路径>     # 上传，≤1MB
-  python3 relay.py download <共享区相对路径> [本地路径]   # 下载，≤1MB
+  python3 relay.py upload <本地文件> <共享区相对路径>     # 上传，≤10MB
+  python3 relay.py download <共享区相对路径> [本地路径]   # 下载，≤10MB
   python3 relay.py cancel <id>
   python3 relay.py confirm <id> [--outcome done|conflict]
   python3 relay.py approve <id> --decision approve|deny   # 审批 pending_approval（高危命令拦截）
@@ -54,7 +54,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-__version__ = "1.4.2"
+__version__ = "1.4.3"
 
 # 打包时由 pack.sh 写入：本技能所代表的 dws 认证大脑名（同时作为缺省 profile 名）。
 # 源模板留空 → 缺省 profile 回落 "default"。
@@ -70,7 +70,7 @@ SERVER_MIGRATIONS = {
     "http://10.189.51.29:8787": "https://10.189.51.29:8788",
 }
 TERMINAL = {"done", "review", "conflict", "failed", "cancelled", "pending_approval"}
-MAX_FILE_BYTES = 1 * 1024 * 1024  # 文件通道单文件上限 1MB
+MAX_FILE_BYTES = 10 * 1024 * 1024  # 文件通道单文件上限 10MB
 
 
 def _ssl_ctx(server: str, insecure: bool = False):
@@ -521,7 +521,7 @@ def cmd_upload(args, cfg):
         sys.exit(1)
     size = os.path.getsize(args.local)
     if size > MAX_FILE_BYTES:
-        out({"error": True, "detail": f"文件大小 {size} 字节超过 1MB 上限"})
+        out({"error": True, "detail": f"文件大小 {size} 字节超过 10MB 上限"})
         sys.exit(1)
     with open(args.local, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("ascii")
@@ -639,12 +639,12 @@ def main() -> None:
     p.add_argument("id", type=int)
     p.set_defaults(fn=cmd_diff)
 
-    p = sub.add_parser("upload", parents=[common], help="上传本地文件到共享区（单文件 ≤1MB）")
+    p = sub.add_parser("upload", parents=[common], help="上传本地文件到共享区（单文件 ≤10MB）")
     p.add_argument("local", help="本地文件路径")
     p.add_argument("path", help="共享区相对路径，如 data/9月.xlsx")
     p.set_defaults(fn=cmd_upload)
 
-    p = sub.add_parser("download", parents=[common], help="从共享区下载文件（单文件 ≤1MB）")
+    p = sub.add_parser("download", parents=[common], help="从共享区下载文件（单文件 ≤10MB）")
     p.add_argument("path", help="共享区相对路径")
     p.add_argument("local", nargs="?", default="", help="保存到本地路径（默认文件名）")
     p.set_defaults(fn=cmd_download)

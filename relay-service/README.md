@@ -137,8 +137,8 @@ team_agent.py approve 42 --decision approve   # pending_approval（高危拦截�
 | POST /tasks/{id}/cancel | 取消（排队中直接取消；运行中杀整棵进程树） |
 | GET /tasks/{id}/diff | 变更文件 + 冲突信息 |
 | POST /tasks/{id}/confirm | review/conflict → done（人工核查确认） |
-| POST /files | 上传文件到共享区（JSON：path + content_b64；单文件 ≤1MB，超限 413；防路径穿越） |
-| GET /files?path= | 下载共享区文件（≤1MB；二进制直传） |
+| POST /files | 上传文件到共享区（JSON：path + content_b64；单文件 ≤10MB，超限 413；防路径穿越） |
+| GET /files?path= | 下载共享区文件（≤10MB；二进制直传） |
 | GET /health | 健康检查（免认证） |
 
 任务生命周期：`queued → running → review → done`，分支 `failed / conflict / cancelled`。

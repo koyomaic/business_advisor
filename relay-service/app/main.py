@@ -27,7 +27,8 @@ from .events import TERMINAL, EventBus
 STREAM_END = TERMINAL | {"review"}
 DASH_COOKIE = "relay_dash"
 DASH_TTL = 12 * 3600
-MAX_FILE_BYTES = 1 * 1024 * 1024  # 文件上传/下载通道单文件上限 1MB
+MAX_FILE_BYTES = 10 * 1024 * 1024     # 文件上传/下载通道单文件上限 10MB
+MAX_SHARED_BYTES = 1 * 1024 * 1024    # 共享知识（skill 文件 / memory）单文件上限 1MB（注入全员上下文，保守）
 LOGIN_MAX_FAILS = 5               # dashboard 登录：窗口内同 IP 失败达此次数 → 锁定（防爆破底线）
 LOGIN_LOCK_SEC = 15 * 60          # 锁定与滑动窗口时长：15 分钟
 ACTIVATE_MAX_FAILS = 10           # /auth/activate：窗口内同 IP 无效码达此次数 → 429（防御纵深）
@@ -1033,7 +1034,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    # ---- 文件上传/下载（共享区，单文件 ≤1MB） ----
+    # ---- 文件上传/下载（共享区，单文件 ≤10MB） ----
 
     @app.post("/files", status_code=201)
     async def upload_file(body: UploadFileBody, principal: dict = Depends(auth)):
@@ -1044,7 +1045,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="invalid base64 content")
         if len(data) > MAX_FILE_BYTES:
             raise HTTPException(status_code=413,
-                                detail=f"file size {len(data)} exceeds limit {MAX_FILE_BYTES} bytes (1MB)")
+                                detail=f"file size {len(data)} exceeds limit {MAX_FILE_BYTES} bytes (10MB)")
         os.makedirs(os.path.dirname(full) or cfg.shared_dir, exist_ok=True)
         with open(full, "wb") as f:
             f.write(data)
@@ -1060,7 +1061,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         size = os.path.getsize(full)
         if size > MAX_FILE_BYTES:
             raise HTTPException(status_code=413,
-                                detail=f"file size {size} exceeds limit {MAX_FILE_BYTES} bytes (1MB)")
+                                detail=f"file size {size} exceeds limit {MAX_FILE_BYTES} bytes (10MB)")
         with open(full, "rb") as f:
             data = f.read()
         audit.line(0, principal["name"], "file_download", path)
@@ -1158,9 +1159,9 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             data = base64.b64decode(body.content_b64, validate=True)
         except Exception:
             raise HTTPException(status_code=400, detail="invalid base64 content")
-        if len(data) > MAX_FILE_BYTES:
+        if len(data) > MAX_SHARED_BYTES:
             raise HTTPException(status_code=413,
-                                detail=f"file size {len(data)} exceeds limit {MAX_FILE_BYTES} bytes (1MB)")
+                                detail=f"file size {len(data)} exceeds limit {MAX_SHARED_BYTES} bytes (1MB)")
         os.makedirs(os.path.dirname(full) or sdir, exist_ok=True)
         with open(full, "wb") as f:
             f.write(data)
@@ -1210,7 +1211,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
     async def shared_memory_upload(request: Request, body: SharedMemoryUpload):
         _dash_auth(request)
         name = _check_shared_name(body.name)
-        if len(body.content.encode("utf-8")) > MAX_FILE_BYTES:
+        if len(body.content.encode("utf-8")) > MAX_SHARED_BYTES:
             raise HTTPException(status_code=413, detail="content exceeds 1MB")
         root = os.path.join(cfg.shared_dir, "memory")
         os.makedirs(root, exist_ok=True)

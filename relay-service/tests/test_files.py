@@ -5,7 +5,7 @@ import hashlib
 
 import httpx
 
-MB = 1 * 1024 * 1024
+MB = 10 * 1024 * 1024  # 文件通道单文件上限（与服务端 MAX_FILE_BYTES 一致）
 
 
 def test_upload_download_roundtrip(member, relay):
@@ -22,7 +22,7 @@ def test_upload_download_roundtrip(member, relay):
     assert (relay["ws"] / "shared" / "data" / "round.bin").read_bytes() == payload
 
 
-def test_upload_exactly_1mb_ok(member):
+def test_upload_exactly_10mb_ok(member):
     exact = "y" * MB
     r = member.post("/files", json={
         "path": "exact.bin",
@@ -32,7 +32,7 @@ def test_upload_exactly_1mb_ok(member):
     assert r.json()["size"] == MB
 
 
-def test_upload_over_1mb_rejected(member):
+def test_upload_over_10mb_rejected(member):
     big = "x" * (MB + 1)
     r = member.post("/files", json={
         "path": "big.txt",
@@ -41,7 +41,7 @@ def test_upload_over_1mb_rejected(member):
     assert r.status_code == 413
 
 
-def test_download_over_1mb_rejected(member, relay):
+def test_download_over_10mb_rejected(member, relay):
     (relay["ws"] / "shared" / "big2.bin").write_bytes(b"z" * (MB + 1))
     r = member.get("/files", params={"path": "big2.bin"})
     assert r.status_code == 413

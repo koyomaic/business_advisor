@@ -54,10 +54,13 @@ def main() -> int:
         pconn.commit()
         print(f"已清空目标库（原 users={n_users} tasks={n_tasks}）")
 
-    for r in sconn.execute("SELECT token, name, created_at FROM users"):
-        pcur.execute("INSERT INTO users(token, name, created_at) VALUES(%s,%s,%s)"
+    ucols = {r[1] for r in sconn.execute("PRAGMA table_info(users)")}
+    ucols_sel = ["token", "name", "created_at"] + (["consumed_at"] if "consumed_at" in ucols else [])
+    uph = ",".join(["%s"] * len(ucols_sel))
+    for r in sconn.execute(f"SELECT {','.join(ucols_sel)} FROM users"):
+        pcur.execute(f"INSERT INTO users({','.join(ucols_sel)}) VALUES({uph})"
                      " ON CONFLICT (token) DO NOTHING",
-                     (r["token"], r["name"], r["created_at"]))
+                     tuple(r[c] for c in ucols_sel))
     users_migrated = sconn.execute("SELECT count(*) FROM users").fetchone()[0]
 
     cols = [r[1] for r in sconn.execute("PRAGMA table_info(tasks)")]
@@ -65,7 +68,9 @@ def main() -> int:
     ph = ",".join(["%s"] * len(cols))
     tasks_migrated = 0
     for r in sconn.execute(f"SELECT {collist} FROM tasks ORDER BY id"):
-        pcur.execute(f"INSERT INTO tasks({collist}) VALUES({ph})", tuple(r[c] for c in cols))
+        # SQLite read_only 为 INTEGER(0/1)，PG 为 BOOLEAN，直接插 int 会 DatatypeMismatch
+        pcur.execute(f"INSERT INTO tasks({collist}) VALUES({ph})",
+                     tuple(bool(r[c]) if c == "read_only" else r[c] for c in cols))
         tasks_migrated += 1
     pcur.execute("SELECT setval(pg_get_serial_sequence('tasks','id'),"
                  " COALESCE((SELECT MAX(id) FROM tasks), 1))")

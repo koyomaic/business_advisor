@@ -1,6 +1,6 @@
 ---
 name: team-agent-relay
-version: 1.4.1
+version: 1.4.2
 description: 团队远程执行中转服务,经 dws 认证大脑在团队服务器上跑任务(共享工具/知识库/钉钉身份)。用于"在服务器上跑任务、写经营月报、查知识库、用钉钉收发、上传/下载文件(≤1MB)"。能力:提交任务、实时直播进展、续会话、变更核查、文件上传/下载、取消;多公司装多包并存。
 ---
 
@@ -68,6 +68,7 @@ token 只接受用户本人提供，绝不猜测/复用示例值；token 不落�
 | **从服务器下载文件**（产出/结果） | `S download data/report.md ./report.md`（本地路径可省，默认存文件名） |
 | 取消 | `S cancel 42` |
 | review 核查后确认 | `S confirm 42` |
+| **审批高危拦截**（任务停在 `pending_approval`，如钉钉群发被拦） | `S approve 42 --decision approve`（放行续跑）／ `S approve 42 --decision deny`（拒绝置 failed） |
 | 版本对照（客户端/服务端/是否需升级） | `S version` |
 | 列出全部公司配置 | `S profiles`（token 打码） |
 
@@ -92,11 +93,15 @@ token 只接受用户本人提供，绝不猜测/复用示例值；token 不落�
 2. `S run`（或 submit + stream 直播）
 3. 到 `review`：`S diff` 给用户看改动 → 认可 → `S confirm`
    - 不满意 → `S submit "追加要求" --resume <id>`
-4. `conflict`：告知冲突详情（哪两个任务/哪个文件/备份在哪），人工核查
-5. `failed`：读 error，调整描述重新提交
+4. `pending_approval`（高危命令被服务器侧拦截，**最常见：钉钉群发/多接收人发送**）：
+   `S status 42` 看 `error`/`blocked_cmd`（被拦的具体命令）→ 告知用户"某条发送被拦待审批" →
+   用户同意后 `S approve 42 --decision approve`（放行续跑）；不要发则 `--decision deny`
+5. `conflict`：告知冲突详情（哪两个任务/哪个文件/备份在哪），人工核查
+6. `failed`：读 error，调整描述重新提交
 
 ## 规则与边界
 
 - 单任务 30 分钟超时；**review 不是终点**，diff 给用户看过并 confirm 才算 done
 - 同文件被两任务改动不会静默覆盖：先完成者版本自动备份 `.bak-用户-HHMM`，后完成者标 conflict
 - 共享区约定：`shared/knowledge/`（知识库，先查）、其余按业务分目录
+- **钉钉发送门控**：服务器侧对 dws 外发消息二次确认——1:1 单聊放行；群聊/多接收人/命中敏感对象 → 任务停 `pending_approval`，须 `S approve` 放行。`run`/`wait` 到此即返回（不再挂到超时），把 `blocked_cmd` 告知用户后走 approve。

@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import signal
+import subprocess
 import time
 from dataclasses import dataclass, field
 
@@ -120,11 +121,19 @@ _DWS_PERSON_FLAGS = {
     "--to", "--user", "--users", "--open-dingtalk-id", "--open-dingtalk-ids",
     "--receiver", "--receiver-open-dingtalk-id", "--user-query",
 }
-# 群聊/会话目标参数（webhook token 的目标即 token 所在群，一并视为群发）
+# 群聊/会话目标参数（webhook token 的目标即 token 所在群，一并视为群发）。
+# 注意：--chat-id/--conversation-id 是"会话"别名，1:1 单聊与群聊都长 cid，
+# 不能一刀切当群发——目标值是 cid 时由 _cid_is_single_chat 按会话类型二次判定。
 _DWS_GROUP_FLAGS = {
     "--group", "--groups", "--groups-file", "--chat-id", "--chat-query",
     "--conversation-id", "--dest-conversation-id", "--webhook-token", "--token",
 }
+# 会话解析缓存：cid -> (singleChat, title)。会话类型/对方名不变，进程内一次解析长期复用。
+# 解析失败不入缓存（下次重试，避免把瞬时故障固化成误判）。
+_CID_INFO_CACHE: dict[str, tuple[bool, str]] = {}
+# 判定一个群/会话目标值是否为"会话 cid"（形如 cidXXX==，base64 字母表 + 尾随 =）。
+# 群名（--group 名/--chat-query）等不含这些特征 → 视为明确群发，直接拦截。
+_CID_RE = re.compile(r"^[A-Za-z0-9+/=]+$")
 # 个别命令里同名 flag 不是发送目标：ding message send-by-message 的 --group 是源会话
 _DWS_NON_TARGET_FLAGS = {("ding", "message", "send-by-message"): {"--group"}}
 
@@ -252,7 +261,7 @@ class Executor:
                 if parsed.get("agent_event"):
                     publish(task_id, t="agent", **parsed["agent_event"])
                 cmd = parsed.get("tool_cmd")
-                if cmd and self._is_blocked(cmd, workdir) and not self._exempt(cmd, exempt_cmd):
+                if cmd and self._is_blocked(cmd, workdir, env) and not self._exempt(cmd, exempt_cmd):
                     self._kill(proc)
                     res.blocked_cmd = cmd
                     res.error = f"blocked: {cmd[:200]}"
@@ -268,7 +277,8 @@ class Executor:
             res.error = f"agent exited with code {proc.returncode}: {tail}"
         return res
 
-    def _is_blocked(self, cmd: str, workdir: str = "") -> str | None:
+    def _is_blocked(self, cmd: str, workdir: str = "",
+                    dws_env: dict | None = None) -> str | None:
         low = cmd.lower()
         for p in self.cfg.blocked_patterns:
             if not p:
@@ -279,7 +289,7 @@ class Executor:
             except re.error:
                 if p.lower() in low:  # 非法正则退化为子串
                     return p
-        confirm = self._confirm_violation(cmd)
+        confirm = self._confirm_violation(cmd, workdir, dws_env)
         if confirm:
             return confirm
         return self._rm_violation(cmd, workdir)
@@ -339,7 +349,8 @@ class Executor:
             return key, persons, groups
         return None
 
-    def _confirm_violation(self, cmd: str) -> str | None:
+    def _confirm_violation(self, cmd: str, workdir: str = "",
+                           dws_env: dict | None = None) -> str | None:
         for segment in re.split(r"[;&|\n]+", cmd):
             if "dws" not in segment:
                 continue
@@ -354,9 +365,58 @@ class Executor:
             if len(persons) >= 2:
                 return (f"dws {target} 多接收人（{len(persons)} 人: "
                         f"{','.join(persons[:5])}），需二次确认")
-            if groups:
-                return f"dws {target} 目标为群聊/会话（{','.join(groups[:3])}），需二次确认"
+            if not groups:
+                continue
+            # 会话 cid 二次判定：dws 里 1:1 单聊与群聊都用 --chat-id/--conversation-id 传 cid，
+            # 须按会话类型区分——单聊放行、群聊拦截（见 _cid_is_single_chat）。
+            # 群名/群参数（--group 名、--chat-query、--groups 多群、--webhook-token 等）
+            # 语义明确是群，直接视为群发拦截，不查类型。
+            cid_vals = [g for g in groups if _CID_RE.match(g) and "=" in g]
+            non_cid = [g for g in groups if g not in cid_vals]
+            if non_cid:
+                return f"dws {target} 目标为群聊（{','.join(non_cid[:3])}），需二次确认"
+            all_single = all(self._cid_is_single_chat(c, dws_env) for c in cid_vals)
+            if all_single:
+                continue  # 1:1 单聊：放行（敏感接收人仍由上面精确匹配拦截）
+            return f"dws {target} 目标为群聊会话（{','.join(cid_vals[:3])}），需二次确认"
         return None
+
+    def _cid_is_single_chat(self, cid: str, dws_env: dict | None) -> bool:
+        """判定会话 cid 是否为 1:1 单聊（True）。群聊/解析失败返回 False（保守，拦截）。
+
+        通过 `dws chat +conversation-info --group <cid>` 读 singleChat 字段（只读、幂等）。
+        复用任务自身运行环境（HOME/XDG/凭证）调用 dws——与任务发送用同一身份；
+        进程内按 cid 缓存复用（cid 即会话唯一标识，类型是其固有属性）。
+        """
+        if cid in _CID_INFO_CACHE:
+            return _CID_INFO_CACHE[cid][0]
+        info = self._dws_conversation_info(cid, dws_env)
+        if info is None:
+            return False  # 解析失败：放行失败=拦截（fail-closed）
+        single, title = info
+        _CID_INFO_CACHE[cid] = (single, title)
+        return single
+
+    def _dws_conversation_info(self, cid: str,
+                               dws_env: dict | None) -> tuple[bool, str] | None:
+        """调用 dws 取会话类型。返回 (singleChat, title)；失败/非预期返回 None。"""
+        env = dict(dws_env) if dws_env else dict(os.environ)
+        try:
+            p = subprocess.run(
+                ["dws", "chat", "+conversation-info", "--group", cid, "--format", "json"],
+                capture_output=True, text=True, timeout=20, env=env)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if p.returncode != 0:
+            return None
+        try:
+            data = json.loads(p.stdout)
+        except (ValueError, AttributeError):
+            return None
+        ci = ((data or {}).get("result") or {}).get("conversationInfo")
+        if not isinstance(ci, dict) or "singleChat" not in ci:
+            return None
+        return (bool(ci.get("singleChat")), str(ci.get("title") or ""))
 
     # ---- 递归 rm 按路径判断：rm_safe_prefixes 与任务自身 HOME 沙箱内放行，其余拦截 ----
 
@@ -418,11 +478,36 @@ class Executor:
         return None
 
     @staticmethod
+    def _send_signatures(cmd: str) -> set[str]:
+        """提取命令里各 dws 发送段的签名（发送路径 + 目标值）。
+
+        用于审批豁免匹配：agent resume 重发同一条发送时可能重排格式
+        （加 --yes、改 | head N），整串相等会漏判；按"发送目标"签名匹配更稳。
+        """
+        sigs: set[str] = set()
+        for segment in re.split(r"[;&|\n]+", cmd):
+            if "dws" not in segment:
+                continue
+            parsed = Executor._dws_send_target(segment)
+            if not parsed:
+                continue
+            key, persons, groups = parsed
+            path = " ".join(key)
+            for v in persons:
+                sigs.add(f"{path} {v}")
+            for v in groups:
+                sigs.add(f"{path} {v}")
+        return sigs
+
+    @staticmethod
     def _exempt(cmd: str, exempt_cmd: str | None) -> bool:
         if not exempt_cmd:
             return False
         c, e = cmd.strip().lower(), exempt_cmd.strip().lower()
-        return c == e or c.startswith(e)
+        cs, es = Executor._send_signatures(cmd), Executor._send_signatures(exempt_cmd)
+        if cs and es:  # dws 发送：按发送目标签名匹配（容忍 resume 重排格式）
+            return bool(cs & es)
+        return c == e or c.startswith(e)  # 非 dws 拦截（rm/mkfs 等）：整串匹配兜底
 
     @staticmethod
     def _tree_pids(root_pid: int) -> list[int]:

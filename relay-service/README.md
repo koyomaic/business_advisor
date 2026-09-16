@@ -60,7 +60,16 @@ systemd 按序加载，**后者覆盖前者**：
   其余（含相对路径/`~`/变量，无法验证）拦截；
 - **核心拦截**（不可逆/会炸服务器）：`mkfs`、写裸盘（`of=/dev/…`、`> /dev/…` 磁盘设备）、
   `shutdown`/`reboot`/`poweroff`/`halt`、`kill -9 1`（init）、`chmod -R 777 /` 或 `~`；
+- **dws 钉钉外发二次确认**：对 dws 发送类命令按目标分级——
+  - **1:1 单聊放行**（`--user`/`--open-dingtalk-id`/`+dm --to`，或 `--chat-id` 解析为单聊会话）；
+  - **群聊/多接收人(≥2)/命中敏感对象** → 拦。群聊含：群名（`--chat-query`/`--group 名`）、
+    多群（`--groups`）、webhook（`--webhook-token`）；`--chat-id`/`--conversation-id` 传 cid 时
+    经 `dws chat +conversation-info` 判会话类型（单聊 `singleChat=true` 放行，群聊 `false` 拦，
+    解析失败按群聊拦=保守）。敏感对象（`RELAY_CONFIRM_RECIPIENTS`，默认含马韵升 userId=1/其
+    openDingTalkId/姓名）命中**一律拦**，不随单聊放宽。
 - 命中 → 任务转 `pending_approval`，人工 approve（放行该条命令续跑）/ deny（置 failed）。
+  放行入口：监控页「待审批」行的 批准/拒绝 按钮，或客户端 `team-agent approve <id> --decision approve|deny`。
+  审批后 resume 带豁免，按**发送目标签名**匹配（agent 重排格式也不漏判）。
 
 ### 共享知识（取消隔离：个人上传即团队全员可用，立即生效）
 
@@ -114,6 +123,7 @@ team_agent.py stream 42                    # SSE：工具调用/文本/状态实
 team_agent.py cancel 42
 team_agent.py diff 42                      # 变更文件清单（冲突判断依据）
 team_agent.py confirm 42                   # review 完成后人工确认 -> done
+team_agent.py approve 42 --decision approve   # pending_approval（高危拦截）放行续跑 / --decision deny 拒绝
 ```
 
 ## API（全部 Bearer token 认证）

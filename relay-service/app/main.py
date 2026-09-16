@@ -159,11 +159,18 @@ async function refresh(){
    <td class="num">${u.done}</td><td class="num">${Math.round((u.done_rate||0)*100)}%</td>
    <td class="num">${u.tokens||0}</td></tr>`).join("")+"</table>";
   document.getElementById("tasks").innerHTML=`<table><tr><th>#</th><th>用户</th><th>状态</th><th>备注</th>
-    <th>任务</th><th>提交</th><th>结束</th><th class="num">tokens</th></tr>`+
-   (d.tasks||[]).map(t=>`<tr><td>${t.id}</td><td>${esc(t.user)}</td><td>${badge(t.status)}</td>
+    <th>任务</th><th>提交</th><th>结束</th><th class="num">tokens</th><th>操作</th></tr>`+
+   (d.tasks||[]).map(t=>{
+     const blocked=t.status==="pending_approval";
+     const bc=t.blocked_cmd||t.error||"";
+     const act=blocked?`<a href="#" class="act" data-k="appr" data-n="${t.id}" title="${esc(bc)}" style="color:#4ade80">批准</a>
+      <a href="#" class="act" data-k="deny" data-n="${t.id}" style="color:#f87171">拒绝</a>`:"";
+     return `<tr><td>${t.id}</td><td>${esc(t.user)}</td><td>${badge(t.status)}</td>
     <td style="font-size:12px;color:#94a3b8" title="${esc(t.error||'')}">${esc((t.error||'').slice(0,24))}</td>
     <td class="desc" title="${esc(t.description)}">${esc(t.description)}</td>
-    <td>${fmtT(t.created_at)}</td><td>${fmtT(t.finished_at)}</td><td class="num">${t.tokens||0}</td></tr>`).join("")
+    <td>${fmtT(t.created_at)}</td><td>${fmtT(t.finished_at)}</td><td class="num">${t.tokens||0}</td>
+    <td>${act}</td></tr>`;
+   }).join("")
     +"</table>";
   document.getElementById("upd").textContent="更新于 "+new Date().toLocaleTimeString("zh",{hour12:false});
  }catch(e){}
@@ -181,6 +188,20 @@ function showTab(v){
 document.getElementById("tab-metrics").addEventListener("click",e=>{e.preventDefault();showTab("m")});
 document.getElementById("tab-tokens").addEventListener("click",e=>{e.preventDefault();showTab("t")});
 document.getElementById("tab-shared").addEventListener("click",e=>{e.preventDefault();showTab("s")});
+document.getElementById("tasks").addEventListener("click",async e=>{
+ const a=e.target.closest("a.act");if(!a)return;e.preventDefault();
+ const k=a.dataset.k,n=a.dataset.n;
+ if(k!=="appr"&&k!=="deny")return;
+ const dec=k==="appr"?"approve":"deny";
+ const msg=(dec==="approve"
+   ?`批准放行任务 ${n} 的拦截命令并续跑？\n\n`
+   :`拒绝任务 ${n}？将被置为 failed（不续跑）。\n\n`)+(a.title||"");
+ if(!confirm(msg))return;
+ const r=await fetch(`/dashboard/tasks/${encodeURIComponent(n)}/approve`,
+   {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({decision:dec})});
+ if(!r.ok){alert("操作失败: "+r.status);return;}
+ refresh();
+});
 async function refreshShared(){
  try{
   const r=await fetch("/dashboard/shared");if(!r.ok)throw 0;const d=await r.json();
@@ -936,29 +957,44 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         ws.cleanup_terminal(row)
         return db.task(task_id)
 
-    @app.post("/tasks/{task_id}/approve")
-    async def approve_task(task_id: int, body: ApproveBody, principal: dict = Depends(auth)):
+    async def _do_approve(task_id: int, decision: str, who: str) -> dict:
+        """审批 pending_approval 任务（放行续跑 / 拒绝置 failed）。
+
+        放行：带 resume_hint 重新入队，exempt_cmd=blocked_cmd 让同一条命令
+        这次过门控（_exempt 按发送目标签名匹配，agent resume 重排格式也不漏判）。
+        由 token 认证端点与 dashboard（cookie）端点共用，逻辑单一。
+        """
         row = db.task(task_id)
         if not row:
             raise HTTPException(status_code=404, detail="task not found")
         if row["status"] != "pending_approval":
             raise HTTPException(status_code=409,
                                 detail=f"task is {row['status']}, only pending_approval can be approved")
-        if body.decision not in ("approve", "deny"):
+        if decision not in ("approve", "deny"):
             raise HTTPException(status_code=422, detail="decision must be approve|deny")
-        if body.decision == "deny":
+        if decision == "deny":
             db.set(task_id, status="failed", error="user denied blocked command",
                    finished_at=time.time())
             bus.publish(task_id, t="status", s="failed", error="user denied blocked command")
-            audit.line(task_id, principal["name"], "deny", (row["blocked_cmd"] or "")[:200])
+            audit.line(task_id, who, "deny", (row["blocked_cmd"] or "")[:200])
             return db.task(task_id)
         hint = (f"上一次执行因高危命令被拦截，人工已批准执行以下命令：\n{row['blocked_cmd']}\n"
                 "请从该命令继续完成原任务。")
         db.set(task_id, status="queued", error="", resume_hint=hint)
-        audit.line(task_id, principal["name"], "approve", (row["blocked_cmd"] or "")[:200])
+        audit.line(task_id, who, "approve", (row["blocked_cmd"] or "")[:200])
         bus.publish(task_id, t="status", s="queued")
         await sched.submit(task_id, row["priority"])
         return {"task_id": task_id, "status": "queued"}
+
+    @app.post("/tasks/{task_id}/approve")
+    async def approve_task(task_id: int, body: ApproveBody, principal: dict = Depends(auth)):
+        return await _do_approve(task_id, body.decision, principal["name"])
+
+    @app.post("/dashboard/tasks/{task_id}/approve")
+    async def dashboard_approve(task_id: int, body: ApproveBody, request: Request):
+        """监控页（cookie 登录）审批入口：放行/拒绝 pending_approval 任务。"""
+        _dash_auth(request)
+        return await _do_approve(task_id, body.decision, "__dashboard__")
 
     @app.get("/tasks/{task_id}/stream")
     async def stream_task(task_id: int, _: dict = Depends(auth)):

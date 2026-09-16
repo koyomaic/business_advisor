@@ -16,6 +16,7 @@
   python3 relay.py download <共享区相对路径> [本地路径]   # 下载，≤1MB
   python3 relay.py cancel <id>
   python3 relay.py confirm <id> [--outcome done|conflict]
+  python3 relay.py approve <id> --decision approve|deny   # 审批 pending_approval（高危命令拦截）
 
 所有子命令支持 --profile <名称> 选择公司/服务器配置
 （缺省顺序: --profile > env TEAM_AGENT_PROFILE > 打包大脑名 PACKAGE_BRAIN > default）。
@@ -53,7 +54,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 # 打包时由 pack.sh 写入：本技能所代表的 dws 认证大脑名（同时作为缺省 profile 名）。
 # 源模板留空 → 缺省 profile 回落 "default"。
@@ -68,7 +69,7 @@ SERVER_MIGRATIONS = {
     "http://10.189.51.23:8787": DEFAULT_SERVER,
     "http://10.189.51.29:8787": "https://10.189.51.29:8788",
 }
-TERMINAL = {"done", "review", "conflict", "failed", "cancelled"}
+TERMINAL = {"done", "review", "conflict", "failed", "cancelled", "pending_approval"}
 MAX_FILE_BYTES = 1 * 1024 * 1024  # 文件通道单文件上限 1MB
 
 
@@ -566,6 +567,14 @@ def cmd_confirm(args, cfg):
     out(payload)
 
 
+def cmd_approve(args, cfg):
+    status, payload = req("POST", cfg, f"/tasks/{args.id}/approve",
+                          {"decision": args.decision})
+    if status == 401:
+        fail(3, status, payload)
+    out(payload)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="relay", description="团队中转服务客户端")
     common = argparse.ArgumentParser(add_help=False)
@@ -648,6 +657,13 @@ def main() -> None:
     p.add_argument("id", type=int)
     p.add_argument("--outcome", choices=["done", "conflict"], default="done")
     p.set_defaults(fn=cmd_confirm)
+
+    p = sub.add_parser("approve", parents=[common],
+                       help="审批 pending_approval（高危命令拦截）：放行或拒绝")
+    p.add_argument("id", type=int)
+    p.add_argument("--decision", choices=["approve", "deny"], required=True,
+                   help="approve=放行该命令续跑; deny=置 failed")
+    p.set_defaults(fn=cmd_approve)
 
     args = ap.parse_args()
     cfg = load_cfg(args.profile)

@@ -438,7 +438,7 @@ fi
 
 # ---------- 21d team-agent-relay ca.pem（公开 CA 证书，不入 git；统一从 RELAY_CA_SRC 的 TLS 链提取） ----------
 step "relay技能ca.pem"
-RELAY_CA_SRC="${RELAY_CA_SRC:-10.189.51.23:8788}"
+RELAY_CA_SRC="${RELAY_CA_SRC:-127.0.0.1:8788}"
 TAR_SRC="$RES_ROOT/skills/team-agent-relay"
 if [ ! -d "$TAR_SRC" ]; then warn "仓库无 team-agent-relay，跳过"
 else

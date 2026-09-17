@@ -29,12 +29,12 @@
 配置: 环境变量 TEAM_AGENT_SERVER/TEAM_AGENT_TOKEN/TEAM_AGENT_PROFILE 优先，
 其次 ~/.team-agent/config（INI 多节，每节一组 SERVER=/TOKEN=，节名即 profile；
 旧版无节平铺格式首次加载自动迁移为 [default] 并回写）。
-连接: 默认 https://10.189.51.23:8788（控股经营助理）。传输安全策略（1.4.1）：
+连接: 默认 https://127.0.0.1:8788（环境服务器本机中转）。传输安全策略（1.4.1）：
 仅允许 https——http:// 地址直接拒绝（除非显式 --insecure/TEAM_AGENT_INSECURE=1，
 仅排障用）；TLS 校验独占固定本目录 ca.pem（不叠加系统 CA），ca.pem 缺失时
 拒绝发起请求（fail-fast，不静默回退系统信任库）。历史默认地址（.23:8787 http、
-.29:8787 http）首次加载时按 SERVER_MIGRATIONS 自动迁移并回写。.29 为新能源中转，
-新能源成员用 --profile 新能源 --server https://10.189.51.29:8788 配置。
+.29:8787 http、.32:8787 http）首次加载时按 SERVER_MIGRATIONS 自动迁移并回写。
+.29 为新能源中转，新能源成员用 --profile 新能源 --server https://10.189.51.29:8788 配置。
 """
 from __future__ import annotations
 
@@ -63,11 +63,12 @@ PACKAGE_BRAIN = ""
 CFG_PATH = os.path.expanduser("~/.team-agent/config")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CA_PEM = os.path.join(SCRIPT_DIR, "ca.pem")
-DEFAULT_SERVER = "https://10.189.51.23:8788"   # 源模板默认；成员包由 pack.sh 写入所属大脑服务器
-# 历史默认地址 → 现地址（首载自动迁移回写；.29=新能源只做 http→https 原地升级，不跨机迁移）
+DEFAULT_SERVER = "https://127.0.0.1:8788"   # 源模板默认（环境服务器本机中转）；成员包由 pack.sh 写入所属大脑服务器
+# 历史默认地址 → 现地址（首载自动迁移回写；各机 .N:8787 只回本机 https，不跨机迁移）
 SERVER_MIGRATIONS = {
-    "http://10.189.51.23:8787": DEFAULT_SERVER,
+    "http://10.189.51.23:8787": "https://10.189.51.23:8788",
     "http://10.189.51.29:8787": "https://10.189.51.29:8788",
+    "http://10.189.51.32:8787": "https://10.189.51.32:8788",
 }
 TERMINAL = {"done", "review", "conflict", "failed", "cancelled", "pending_approval"}
 MAX_FILE_BYTES = 10 * 1024 * 1024  # 文件通道单文件上限 10MB

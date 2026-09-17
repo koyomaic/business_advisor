@@ -23,11 +23,11 @@ description: 团队远程执行中转服务,经 dws 认证大脑在团队服务�
 ## 连接
 
 <!-- PACK:SERVER-START -->
-- 源模板默认 `https://10.189.51.23:8788`；成员包打包时已写入所属大脑的服务器，无需手配。各中转服务器的大脑身份以该机 `dws auth status` 为准（.23 现为 白露，.29 现为 新能源经营利润运营大脑）
+- 源模板默认 `https://127.0.0.1:8788`（环境服务器本机中转）；成员包打包时已写入所属大脑的服务器，无需手配。各中转服务器的大脑身份以该机 `dws auth status` 为准（.23 现为 白露，.29 现为 新能源经营利润运营大脑，.32 现为 墨源经营利润运营大脑）
 <!-- PACK:SERVER-END -->
 - **传输安全（1.4.1）**：仅允许 `https://`——`http://` 地址直接拒绝（`INSECURE_TRANSPORT_REFUSED`）；TLS 校验**独占固定**本目录 `ca.pem`（不叠加系统 CA），`ca.pem` 缺失时拒绝发起请求（`CA_PEM_MISSING`，不静默回退系统信任库）。排障可显式 `--insecure`（或 env `TEAM_AGENT_INSECURE=1`）临时放行，日常禁用
 - **认证**：token 即**一次性激活码**——首次使用自动核销 token、绑定本设备换回设备凭证（`~/.team-agent/` 内，0600），此后请求用 HMAC 签名（凭证永不上网络、15 分钟时间窗、nonce 防重放）；泄露聊天记录里的已激活 token 无法冒用。旧服务端无激活端点时自动回落 bearer，不阻塞
-- 历史默认地址（.23:8787 http、.29:8787 http）首次加载自动迁移为对应 https 并回写，无需手工改
+- 历史默认地址（.23:8787 http、.29:8787 http、.32:8787 http）首次加载自动迁移为对应 https 并回写，无需手工改
 - 指向其它主机：`S config <token> --server <url>`
 - **多公司并存**：配置为 INI 多节（`~/.team-agent/config`），profile 缺省自动用**本包大脑名**（源模板回落 `default`）；所有命令支持 `--profile <名称>` 覆盖（env `TEAM_AGENT_PROFILE`）。旧版单组平铺配置首次加载自动迁移为 `[default]`
 

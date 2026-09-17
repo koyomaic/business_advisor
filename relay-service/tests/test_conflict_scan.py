@@ -11,6 +11,7 @@ from app.workspace import Workspace, is_volatile
 from conftest import submit, wait_task
 
 DWS_TOKEN = "shared/secrets/dws-cli-seed/dws-cli/auth-token_test.enc"
+TOKEN_CACHE = "shared/skills/jingbo-data-api/config/.token_cache"
 
 
 def _cfg(tmp_path, **kw) -> Settings:
@@ -49,13 +50,15 @@ def test_scan_excludes_volatile_from_changed_files(tmp_path):
     workdir = ws.prepare(db.task(tid))
     _write(tmp_path, "shared/reports/out.md", "real")
     _write(tmp_path, DWS_TOKEN, "tok")
+    _write(tmp_path, TOKEN_CACHE, "cache")
 
     scan = ws.scan(db.task(tid))
     assert scan["all"] == ["shared/reports/out.md"]
-    assert scan["volatile"] == [DWS_TOKEN]
+    assert scan["volatile"] == sorted([DWS_TOKEN, TOKEN_CACHE])
     assert db.task(tid)["changed_files"] == ["shared/reports/out.md"]
     # 易变文件不进 .result，也就不会被当作冲突备份源
-    assert not os.path.exists(os.path.join(workdir, ".result", DWS_TOKEN))
+    for rel in (DWS_TOKEN, TOKEN_CACHE):
+        assert not os.path.exists(os.path.join(workdir, ".result", rel))
     assert os.path.exists(os.path.join(workdir, ".result", "shared/reports/out.md"))
 
 
@@ -67,7 +70,10 @@ def test_read_only_violation_ignores_volatile(tmp_path):
     tid = db.create_task(user="tester", description="只读核查", read_only=True)
     ws.prepare(db.task(tid))
     _write(tmp_path, DWS_TOKEN, "tok")
-    assert ws.scan(db.task(tid))["all"] == []
+    _write(tmp_path, TOKEN_CACHE, "cache")
+    scan = ws.scan(db.task(tid))
+    assert scan["all"] == []
+    assert scan["volatile"] == sorted([DWS_TOKEN, TOKEN_CACHE])
 
 
 def test_tasks_with_file_time_window(tmp_path):

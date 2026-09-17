@@ -102,9 +102,14 @@ class Workspace:
         # dws 凭证种子（shared/secrets/dws-cli-seed/）的 token 轮换是基础设施状态
         # （任务 HOME 软链原地刷新，见 shared_knowledge._symlink_dws_seed），非任务产出：
         # 不排除会让触发刷新的 dws 任务误标 conflict，并引发跨任务伪冲突。
+        # 轮换过的文件仍记入 volatile，便于排查「为什么这个任务没有产出」。
         seed_rel = os.path.relpath(
             os.path.join(self.cfg.shared_dir, "secrets", "dws-cli-seed"),
             self.cfg.workspace_root) + os.sep
+        seed_changed = sorted(
+            k for k in set(baseline) | set(cur)
+            if k.startswith(seed_rel)
+            and (k not in baseline or k not in cur or baseline[k][2] != cur[k][2]))
         baseline = {k: v for k, v in baseline.items() if not k.startswith(seed_rel)}
         cur = {k: v for k, v in cur.items() if not k.startswith(seed_rel)}
 
@@ -118,9 +123,10 @@ class Workspace:
             if rel not in cur:
                 deleted.append(rel)
 
-        # 工具自动重写的运行时产物（dws 凭据缓存等）单列，不计产出、不参与冲突判定
+        # 其余工具自动重写的运行时产物（token 缓存、冲突备份自身）单列，不计产出、不参与冲突判定
         pats = getattr(self.cfg, "volatile_patterns", None) or []
-        volatile = sorted({r for r in created + modified + deleted if is_volatile(r, pats)})
+        volatile = sorted(set(seed_changed)
+                          | {r for r in created + modified + deleted if is_volatile(r, pats)})
         created = [r for r in created if not is_volatile(r, pats)]
         modified = [r for r in modified if not is_volatile(r, pats)]
         deleted = [r for r in deleted if not is_volatile(r, pats)]

@@ -598,23 +598,31 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             return
         row = db.task(task_id)  # 刷新
         scan = ws.scan(row)
-        conflicts = _check_conflicts(row, scan, finished)
+        real_conflicts = _check_conflicts(row, scan, finished)
+        conflicts = list(real_conflicts)
+        # 只读声明的事后兜底按风险分级：覆盖/删除既有文件 → conflict（有数据损失风险）；
+        # 仅新建文件 → review（无覆盖风险，按正常产出走人工确认，不再误报冲突）。
+        ro_overwritten = sorted(set(scan["modified"]) | set(scan["deleted"])) \
+            if row.get("read_only") else []
         if row.get("read_only") and scan["all"]:
             conflicts.append({
-                "file": ", ".join(scan["all"][:5]),
+                "file": ", ".join((ro_overwritten or scan["all"])[:5]),
                 "with_task": task_id,
                 "with_user": row["user"],
                 "backup": "",
-                "note": "任务声明只读（read_only）但产生了文件改动，请人工核查",
+                "note": ("任务声明只读（read_only）却覆盖/删除了既有文件，请人工核查"
+                         if ro_overwritten else
+                         "任务声明只读（read_only）但新建了文件（未覆盖既有内容），请人工核查"),
             })
         if res.error == "cancelled":
             status, err = "cancelled", "cancelled by user"
         elif res.error:
             status, err = "failed", res.error
-        elif conflicts:
+        elif real_conflicts or ro_overwritten:
             status, err = "conflict", ""
         elif not scan["all"]:
-            status, err = "done", "自动done（只读，无文件改动）"
+            status, err = "done", ("自动done（仅工具缓存变动，无实质产出）"
+                                   if scan.get("volatile") else "自动done（只读，无文件改动）")
         else:
             status, err = "review", ""
         db.set(task_id, status=status, error=err, finished_at=finished,
@@ -627,9 +635,16 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
             ws.cleanup_terminal(row)
 
     def _check_conflicts(row: dict, scan: dict, finished_at: float) -> list[dict]:
+        """同文件冲突判定：仅比对时间窗内（conflict_window_hours）仍有活动的任务。
+
+        窗外的先后写入属正常演进（后者基于前者产出继续改），不置 conflict；
+        工具自动重写的缓存/凭据已在 scan 阶段剔除，不会进入 scan["all"]。
+        """
         conflicts: list[dict] = []
+        win_h = cfg.conflict_window_hours
+        since = finished_at - win_h * 3600
         for rel in scan["all"]:
-            for other in db.tasks_with_file(rel, exclude=row["id"]):
+            for other in db.tasks_with_file(rel, exclude=row["id"], since=since):
                 if other["status"] == "cancelled":
                     continue
                 if not other["changed_files"]:
@@ -639,11 +654,12 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
                     "with_task": other["id"],
                     "with_user": other["user"],
                     "backup": "",
-                    "note": "两个任务时间窗内都改动了同一文件",
+                    "note": f"两个任务在 {win_h:g}h 时间窗内都改动了同一文件",
                 }
                 if other.get("finished_at") and other["finished_at"] < finished_at:
                     entry["backup"] = ws.backup_version(other, rel) or ""
-                    entry["note"] = f"任务 #{other['id']}（{other['user']}）先完成，其版本已备份，磁盘保留后写入版本"
+                    entry["note"] = (f"任务 #{other['id']}（{other['user']}）先完成，"
+                                     f"其版本已备份，磁盘保留后写入版本")
                 else:
                     entry["note"] = f"任务 #{other['id']}（{other['user']}）同时段也在改动该文件，完成时将互相备份"
                 if not any(c["with_task"] == other["id"] and c["file"] == rel for c in conflicts):

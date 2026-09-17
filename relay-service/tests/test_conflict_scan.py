@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+import os
+import time
+
+import httpx
+
+from app.config import DEFAULT_VOLATILE_PATTERNS, Settings
+from app.db import DB
+from app.workspace import Workspace, is_volatile
+from conftest import submit, wait_task
+
+DWS_TOKEN = "shared/secrets/dws-cli-seed/dws-cli/auth-token_test.enc"
+
+
+def _cfg(tmp_path, **kw) -> Settings:
+    return Settings(
+        db_path=str(tmp_path / "relay.db"),
+        workspace_root=str(tmp_path),
+        shared_dir=str(tmp_path / "shared"),
+        task_root=str(tmp_path / "tasks"),
+        users_root=str(tmp_path / "users"),
+        admin_token="admin-test",
+        **kw,
+    )
+
+
+def _write(root, rel: str, content: str) -> None:
+    p = os.path.join(str(root), rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def test_is_volatile_matches_tool_caches():
+    pats = DEFAULT_VOLATILE_PATTERNS
+    assert is_volatile(DWS_TOKEN, pats)
+    assert is_volatile("shared/skills/jingbo-data-api/config/.token_cache", pats)
+    assert is_volatile("shared/reports/a.md.bak-崔成东-1212", pats)
+    assert not is_volatile("shared/knowledge/调价.md", pats)
+    assert not is_volatile("shared/reports/日报.md", pats)
+
+
+def test_scan_excludes_volatile_from_changed_files(tmp_path):
+    cfg = _cfg(tmp_path)
+    db = DB(cfg.db_path)
+    ws = Workspace(cfg, db)
+    tid = db.create_task(user="tester", description="用 dws 发消息并产出报告")
+    workdir = ws.prepare(db.task(tid))
+    _write(tmp_path, "shared/reports/out.md", "real")
+    _write(tmp_path, DWS_TOKEN, "tok")
+
+    scan = ws.scan(db.task(tid))
+    assert scan["all"] == ["shared/reports/out.md"]
+    assert scan["volatile"] == [DWS_TOKEN]
+    assert db.task(tid)["changed_files"] == ["shared/reports/out.md"]
+    # 易变文件不进 .result，也就不会被当作冲突备份源
+    assert not os.path.exists(os.path.join(workdir, ".result", DWS_TOKEN))
+    assert os.path.exists(os.path.join(workdir, ".result", "shared/reports/out.md"))
+
+
+def test_read_only_violation_ignores_volatile(tmp_path):
+    """只读任务仅触发工具缓存重写 → 不算违规（线上 #43 误报形态）。"""
+    cfg = _cfg(tmp_path)
+    db = DB(cfg.db_path)
+    ws = Workspace(cfg, db)
+    tid = db.create_task(user="tester", description="只读核查", read_only=True)
+    ws.prepare(db.task(tid))
+    _write(tmp_path, DWS_TOKEN, "tok")
+    assert ws.scan(db.task(tid))["all"] == []
+
+
+def test_tasks_with_file_time_window(tmp_path):
+    cfg = _cfg(tmp_path)
+    db = DB(cfg.db_path)
+    now = time.time()
+    old = db.create_task(user="a", description="old")
+    db.set(old, changed_files=["shared/x.md"], status="done",
+           started_at=now - 72 * 3600, finished_at=now - 72 * 3600)
+    recent = db.create_task(user="b", description="recent")
+    db.set(recent, changed_files=["shared/x.md"], status="review",
+           started_at=now - 60, finished_at=now - 30)
+    cur = db.create_task(user="c", description="cur")
+
+    assert {t["id"] for t in db.tasks_with_file("shared/x.md", exclude=cur)} == {old, recent}
+    got = db.tasks_with_file("shared/x.md", exclude=cur, since=now - 24 * 3600)
+    assert [t["id"] for t in got] == [recent]
+
+
+# 假 agent：按 prompt 关键字写「凭据缓存」或「真实报告」，内容每次不同以触发哈希变更
+FAKE_AGENT = """#!/bin/sh
+prompt="$*"
+if printf '%s' "$prompt" | grep -q "写缓存"; then
+  mkdir -p ../../shared/secrets/dws-cli-seed/dws-cli
+  printf 'tok-%s\\n' "$(date +%s%N)" > ../../shared/secrets/dws-cli-seed/dws-cli/auth-token_test.enc
+fi
+if printf '%s' "$prompt" | grep -q "写报告"; then
+  mkdir -p ../../shared/reports
+  printf 'v-%s\\n' "$(date +%s%N)" > ../../shared/reports/r.md
+fi
+printf '%s\\n' '{"type":"text","sessionID":"ses_c","part":{"type":"text","text":"done"}}'
+printf '%s\\n' '{"type":"step_finish","sessionID":"ses_c","part":{"tokens":{"total":5},"cost":0}}'
+exit 0
+"""
+
+
+def _fake_relay(relay_factory, tmp_path, **overrides) -> dict:
+    script = tmp_path / "fake_agent.sh"
+    script.write_text(FAKE_AGENT)
+    script.chmod(0o755)
+    return relay_factory(agent_bin=str(script), task_timeout=60, **overrides)
+
+
+def test_volatile_rewrite_never_conflicts(relay_factory, tmp_path):
+    """线上误报复现：连续多个任务调用 dws，凭据缓存每次被重写 → 全部 done，不判冲突。"""
+    r = _fake_relay(relay_factory, tmp_path)
+    base = r["base"]
+    admin_c = httpx.Client(base_url=base, headers={"Authorization": "Bearer admin-test"},
+                           timeout=30)
+    tok = admin_c.post("/users", json={"name": "中鲁运营"}).json()["token"]
+    for i in range(3):
+        tid = submit(base, tok, f"用 dws 给王洪彬发消息（写缓存）第 {i + 1} 次")["task_id"]
+        t = wait_task(base, tok, tid, timeout=60)
+        assert t["status"] == "done", t
+        assert t["conflicts"] == [], t
+        assert t["changed_files"] == [], t
+        assert "缓存" in t["error"], t
+    admin_c.close()
+
+
+def test_conflict_only_within_window(relay_factory, tmp_path):
+    """同一真实文件：窗内先后写入仍判冲突并备份；窗外属正常演进，不判冲突。"""
+    r = _fake_relay(relay_factory, tmp_path)
+    base = r["base"]
+    admin_c = httpx.Client(base_url=base, headers={"Authorization": "Bearer admin-test"},
+                           timeout=30)
+    tok = admin_c.post("/users", json={"name": "tester"}).json()["token"]
+
+    t1 = wait_task(base, tok, submit(base, tok, "写报告 v1")["task_id"], timeout=60)
+    assert t1["status"] == "review", t1
+    t2 = wait_task(base, tok, submit(base, tok, "写报告 v2")["task_id"], timeout=60)
+    assert t2["status"] == "conflict", t2
+    assert any(c["with_task"] == t1["id"] and c["backup"] for c in t2["conflicts"]), t2
+
+    r["cfg"].conflict_window_hours = 0  # 时间窗收到 0：此前任务全部落在窗外
+    t3 = wait_task(base, tok, submit(base, tok, "写报告 v3")["task_id"], timeout=60)
+    assert t3["status"] == "review", t3
+    assert t3["conflicts"] == [], t3
+    admin_c.close()

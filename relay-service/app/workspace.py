@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -7,6 +8,14 @@ import shutil
 import time
 
 SKIP_DIRS = {".baseline", ".result", "home", "data", ".git", "node_modules", "__pycache__"}
+
+
+def is_volatile(rel: str, patterns: list[str]) -> bool:
+    """路径是否属工具自动重写的运行时产物（凭据/token 缓存、备份文件等）。
+
+    这类改动不是任务产出：不计入 changed_files，也不参与冲突判定。
+    """
+    return any(fnmatch.fnmatchcase(rel, p) for p in patterns)
 
 
 def _sha(path: str) -> str:
@@ -108,6 +117,13 @@ class Workspace:
         for rel in baseline:
             if rel not in cur:
                 deleted.append(rel)
+
+        # 工具自动重写的运行时产物（dws 凭据缓存等）单列，不计产出、不参与冲突判定
+        pats = getattr(self.cfg, "volatile_patterns", None) or []
+        volatile = sorted({r for r in created + modified + deleted if is_volatile(r, pats)})
+        created = [r for r in created if not is_volatile(r, pats)]
+        modified = [r for r in modified if not is_volatile(r, pats)]
+        deleted = [r for r in deleted if not is_volatile(r, pats)]
         created.sort(); modified.sort(); deleted.sort()
 
         for rel in created + modified:
@@ -119,7 +135,8 @@ class Workspace:
 
         all_changed = sorted(set(created) | set(modified) | set(deleted))
         self.db.set(task["id"], changed_files=all_changed)
-        return {"created": created, "modified": modified, "deleted": deleted, "all": all_changed}
+        return {"created": created, "modified": modified, "deleted": deleted,
+                "all": all_changed, "volatile": volatile}
 
     def backup_version(self, other_task: dict, rel_file: str) -> str | None:
         """把 other_task 产出的 rel_file 版本备份为 <文件>.bak-<用户>-HHMM，绝不静默覆盖。"""

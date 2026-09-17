@@ -33,6 +33,18 @@ DEFAULT_RM_SAFE_PREFIXES = ["/tmp", "/var/tmp"]
 # （避免误伤 37505774 等含 1 的 userId）。
 DEFAULT_CONFIRM_RECIPIENTS = ["马韵升", "1", "D3QFnNNkA4zsa6fEkz0vxWVZZG4c4SxTc"]
 
+# 工具自动重写的运行时产物（fnmatch 通配，匹配工作区相对路径）：不是任务产出。
+# 典型如 dws CLI 每次调用都刷新的凭据缓存——若计入 changed_files，则每个用过 dws 的
+# 任务都会与历史上所有用过 dws 的任务"撞文件"，把成功任务误判成 conflict。
+# 命中的路径不计产出、不参与冲突判定（scan 结果里单列 volatile 供排查）。
+DEFAULT_VOLATILE_PATTERNS = [
+    "*auth-token*",      # dws CLI 凭据缓存（shared/secrets/dws-cli-seed/...）
+    "*.token_cache",     # 接口技能 token 缓存
+    ".token_cache",
+    "*.bak-*",           # 冲突备份自身产物（Workspace.backup_version 生成）
+    "*.pyc",
+]
+
 
 def _blocked_patterns_from_env() -> list[str]:
     raw = os.environ.get("RELAY_BLOCKED_PATTERNS", "").strip()
@@ -52,6 +64,13 @@ def _confirm_recipients_from_env() -> list[str]:
     raw = os.environ.get("RELAY_CONFIRM_RECIPIENTS", "").strip()
     if not raw:
         return list(DEFAULT_CONFIRM_RECIPIENTS)
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _volatile_patterns_from_env() -> list[str]:
+    raw = os.environ.get("RELAY_VOLATILE_PATTERNS", "").strip()
+    if not raw:
+        return list(DEFAULT_VOLATILE_PATTERNS)
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
@@ -77,6 +96,8 @@ class Settings:
     blocked_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_BLOCKED_PATTERNS))
     rm_safe_prefixes: list[str] = field(default_factory=lambda: list(DEFAULT_RM_SAFE_PREFIXES))
     confirm_recipients: list[str] = field(default_factory=lambda: list(DEFAULT_CONFIRM_RECIPIENTS))
+    volatile_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_VOLATILE_PATTERNS))
+    conflict_window_hours: float = 24.0  # 同文件冲突判定的时间窗；窗外的先后写入属正常演进，不算冲突
     relay_exclude_providers: list[str] = field(default_factory=list)  # 任务配置中剔除的 provider（本地专用模型不进任务环境）
     boot_cmd: str = "/opt/team/relay-boot/boot.sh"  # bootloader 入口（POST /admin/update 触发）
     min_client_version: str = ""  # 要求的最低客户端版本（空=不校验；/health 透出，客户端软提醒）
@@ -109,6 +130,8 @@ class Settings:
             blocked_patterns=_blocked_patterns_from_env(),
             rm_safe_prefixes=_rm_safe_prefixes_from_env(),
             confirm_recipients=_confirm_recipients_from_env(),
+            volatile_patterns=_volatile_patterns_from_env(),
+            conflict_window_hours=float(os.environ.get("RELAY_CONFLICT_WINDOW_HOURS", "24")),
             relay_exclude_providers=[p.strip() for p in os.environ.get("RELAY_EXCLUDE_PROVIDERS", "").split(",") if p.strip()],
             boot_cmd=os.environ.get("RELAY_BOOT_CMD", "/opt/team/relay-boot/boot.sh"),
             min_client_version=os.environ.get("RELAY_MIN_CLIENT_VERSION", "").strip(),

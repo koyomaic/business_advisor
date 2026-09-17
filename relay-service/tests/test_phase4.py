@@ -143,11 +143,12 @@ def test_blocked_command_deny_fake_agent(relay_factory, tmp_path):
 
 
 # 假 agent：prompt 含「实际写入」时在共享区写一个文件（模拟违反只读声明），否则纯读回 done
+# 内容带纳秒时间戳，确保重复写入能被哈希比对识别为改动
 FAKE_WRITER = """#!/bin/sh
 prompt="$*"
 if printf '%s' "$prompt" | grep -q "实际写入"; then
   mkdir -p ../../shared/knowledge
-  printf 'dirty\\n' > ../../shared/knowledge/dirty.txt
+  printf 'dirty-%s\\n' "$(date +%s%N)" > ../../shared/knowledge/dirty.txt
 fi
 printf '%s\\n' '{"type":"text","sessionID":"ses_w","part":{"type":"text","text":"done"}}'
 printf '%s\\n' '{"type":"step_finish","sessionID":"ses_w","part":{"tokens":{"total":5},"cost":0}}'
@@ -165,13 +166,13 @@ def test_read_only_violation_and_clean(relay_factory, tmp_path):
                            timeout=30)
     tok = admin_c.post("/users", json={"name": "reader"}).json()["token"]
 
-    # 描述带「只读」标记 → read_only 落库；实际却改了文件 → conflict + 违规说明（事后兜底）
+    # 描述带「只读」标记 → read_only 落库；仅新建文件（无覆盖风险）→ review + 违规说明
     tid = submit(base, tok, "只读核查（实际写入验证）：回复 done",
                  targets=["shared/knowledge"])["task_id"]
     t = wait_task(base, tok, tid, timeout=60)
     assert t["read_only"] is True, t
-    assert t["status"] == "conflict", t
-    assert any("只读" in c["note"] for c in t["conflicts"]), t
+    assert t["status"] == "review", t
+    assert any("只读" in c["note"] and "新建" in c["note"] for c in t["conflicts"]), t
     assert "shared/knowledge/dirty.txt" in t["changed_files"], t
 
     # 真纯读无改动 → 自动 done（基线已含 dirty.txt，无新增变更）
@@ -179,6 +180,14 @@ def test_read_only_violation_and_clean(relay_factory, tmp_path):
     t2 = wait_task(base, tok, tid2, timeout=60)
     assert t2["status"] == "done", t2
     assert t2["read_only"] is True, t2
+
+    # 只读声明却覆盖既有文件 → conflict（有数据损失风险）；时间窗收 0 以隔离跨任务判定
+    r["cfg"].conflict_window_hours = 0
+    tid3 = submit(base, tok, "只读核查（实际写入验证）第二轮：回复 done",
+                  targets=["shared/knowledge"])["task_id"]
+    t3 = wait_task(base, tok, tid3, timeout=60)
+    assert t3["status"] == "conflict", t3
+    assert any("覆盖" in c["note"] for c in t3["conflicts"]), t3
     admin_c.close()
 
 

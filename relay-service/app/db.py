@@ -352,13 +352,24 @@ class DB:
         rows = self._q("SELECT * FROM tasks WHERE status IN ('queued', 'running', 'pending_approval') ORDER BY id")
         return [_row_to_task(r) for r in rows]
 
-    def tasks_with_file(self, rel_file: str, exclude: int) -> list[dict]:
+    def tasks_with_file(self, rel_file: str, exclude: int,
+                        since: float | None = None) -> list[dict]:
+        """改动过同一文件的其它任务（冲突候选）。
+
+        since 给定时只保留该时刻之后仍有活动的任务：时间窗外的先后写入属正常演进
+        （后者基于前者的产出继续改），不算冲突。
+        """
         rows = self._q("SELECT * FROM tasks WHERE id != ? AND changed_files != '[]'", (exclude,))
         out = []
         for r in rows:
             t = _row_to_task(r)
-            if rel_file in t["changed_files"]:
-                out.append(t)
+            if rel_file not in t["changed_files"]:
+                continue
+            if since is not None:
+                last = t.get("finished_at") or t.get("started_at") or t.get("created_at") or 0.0
+                if last < since:
+                    continue
+            out.append(t)
         return out
 
     def status_counts(self) -> dict[str, int]:

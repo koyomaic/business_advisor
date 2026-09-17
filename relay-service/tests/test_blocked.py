@@ -15,7 +15,7 @@ def ex() -> Executor:
 
 # ---- 建设初期开放：不再拦截 ----
 
-def test_systemctl_fully_open(ex):
+def test_systemctl_readonly_open(ex):  # 2026-09-17 加固后仅只读子命令放行
     assert ex._is_blocked("systemctl --user status --no-pager") is None
     assert ex._is_blocked("systemctl list-units --state=running --no-pager") is None
     assert ex._is_blocked("export XDG_RUNTIME_DIR=/run/user/0; systemctl --user status 2>&1") is None
@@ -71,7 +71,9 @@ def test_core_not_over_blocked(ex):
     assert ex._is_blocked("chmod -R 777 /tmp/work") is None  # 非根路径不拦
     assert ex._is_blocked("dd if=/dev/zero of=/tmp/bench bs=1M count=10") is None  # 写文件不拦
     assert ex._is_blocked("echo ok > /dev/null") is None  # 写 /dev/null 不拦
-    assert ex._is_blocked("systemctl daemon-reload") is None
+    # 2026-09-17 加固：systemctl 控制动词改为拦截（旧策略放行）；只读子命令仍放行
+    assert ex._is_blocked("systemctl daemon-reload") is not None
+    assert ex._is_blocked("systemctl status relay") is None
 
 
 # ---- 任务 HOME 沙箱内递归 rm：~/$HOME 展开后放行（凭证同步等合法操作不再误拦） ----

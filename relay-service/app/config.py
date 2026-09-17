@@ -4,10 +4,13 @@ import os
 from dataclasses import dataclass, field
 
 
-# 核心拦截（正则，对命令小写后匹配）：只拦"不可逆 / 会炸服务器 / 批量毁数据"。
-# 建设初期开放优先：systemctl、iptables、ufw、crontab -r、useradd/userdel、
-# curl|sh、wget|sh 一律放行；普通（非递归）rm 也放行。
+# 核心拦截（正则，对命令小写后匹配）：拦"不可逆 / 会炸服务器 / 批量毁数据 / 动中转自身"。
+# 原则：保证安全的基础上最大程度放开——普通（非递归）rm、iptables、curl|sh 等仍放行；
+# git 只读（log/diff/status/clone）、systemctl 只读（status/is-active/cat）不拦。
 # 递归 rm 由 executor._rm_violation 按路径单独判断：rm_safe_prefixes 下放行，其余拦截。
+# 注意：本清单是审计+审批层（可被 python -c 等绕过、可人工批准豁免）；对"中转自身"
+# 的硬边界在 relay.service 挂载命名空间（ProtectSystem=strict + InaccessiblePaths），
+# 硬边界内即使批准也写不动（EROFS），例外只能由人在宿主机操作。
 DEFAULT_BLOCKED_PATTERNS = [
     r"\bmkfs",                                      # 格式化文件系统（不可逆）
     r"\bof=/dev/(sd|vd|nvme|hd|xvd|dm-|md)\w*",     # dd 写裸盘
@@ -15,6 +18,11 @@ DEFAULT_BLOCKED_PATTERNS = [
     r"\b(shutdown|reboot|poweroff|halt)\b",         # 服务器电源操作
     r"\bkill\s+(-9|-kill)\s+1(?!\d)",               # 杀 init（PID 1）
     r"\bchmod\s+-r\s+777\s+(?:~|/(?!\w))",          # 根/家目录递归 777
+    # ---- 中转自身保护（2026-09-17 加固）----
+    r"\bgit\s+(push|commit|am|rebase|merge|reset|clean|tag|remote|cherry-pick|apply|format-patch|revert)\b",
+    r"\bsystemctl\s+(start|stop|restart|try-restart|reload|kill|enable|disable|mask|unmask|edit|daemon-reload|daemon-reexec|isolate|preset)\b",
+    r"\bservice\s+[\w.@-]+\s+(start|stop|restart|reload)\b",
+    r"\b(pkill|killall)\s+.*\b(relay|app\.serve|uvicorn|claude-proxy)\b",
 ]
 DEFAULT_RM_SAFE_PREFIXES = ["/tmp", "/var/tmp"]
 
@@ -73,6 +81,8 @@ class Settings:
     auth_legacy: bool = False     # 旧式 bearer token 认证（生产默认关：token 仅作一次性激活码；过渡需要时置 1）
     sign_window: int = 900        # 设备签名时间窗（秒），防重放；放宽以容忍成员机器时钟漂移
     cleanup_runtime: bool = True  # 任务终态后自动清理 workdir 临时目录（home/data）；置 0 关闭
+    shared_venv: str = ""         # 任务级共享 venv（默认 shared_dir/venv）；bin 前置进任务 PATH，
+    #                               pip install 落这里——沙箱下系统/服务 venv 只读，安装能力保留但碰不到中转运行时
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -105,4 +115,5 @@ class Settings:
             sign_window=int(os.environ.get("RELAY_SIGN_WINDOW", "60")),
             cleanup_runtime=os.environ.get("RELAY_CLEANUP_RUNTIME", "1").strip().lower()
             in ("1", "true", "on", "yes"),
+            shared_venv=os.environ.get("RELAY_SHARED_VENV", "").strip(),
         )

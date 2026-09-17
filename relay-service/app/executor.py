@@ -12,6 +12,18 @@ from dataclasses import dataclass, field
 
 from . import shared_knowledge
 
+# 环境继承收敛（2026-09-17 加固）：服务自身机密绝不进任务环境——
+# RELAY_* 前缀整体剔除（ADMIN_TOKEN / DB 连接串 / DASHBOARD_PASSWORD / TLS_DIR 等），
+# 代码托管凭据按名剔除。ANTHROPIC_*（引擎鉴权必需）与常规运行变量保留。
+# 与 relay.service 挂载命名空间（InaccessiblePaths=relay.env、/root/.ssh 等）双保险。
+_ENV_DROP_PREFIXES = ("RELAY_",)
+_ENV_DROP_EXACT = {"GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT", "GITLAB_TOKEN", "NPM_TOKEN"}
+
+
+def _scrubbed_environ() -> dict:
+    return {k: v for k, v in os.environ.items()
+            if not k.startswith(_ENV_DROP_PREFIXES) and k not in _ENV_DROP_EXACT}
+
 
 @dataclass
 class AgentResult:
@@ -186,15 +198,22 @@ class Executor:
 
     def build_env(self, workdir: str, xdg_config: str | None = None,
                   user: str = "") -> dict:
-        env = dict(os.environ)
+        env = _scrubbed_environ()
         env["HOME"] = os.path.join(workdir, "home")
         env["XDG_CONFIG_HOME"] = (xdg_config or self.cfg.xdg_config_home
                                   or os.path.expanduser("~/.config"))
         env["XDG_DATA_HOME"] = os.path.join(workdir, "data")
         if user:
             # 任务归属用户（终端身份）：供下游技能按发起人归属外部调用
-            # （如 crude-ai-research-institute 以 HERMES_SESSION_MAP 映射一卡通号）
+            # （如 crude-ai-research-institute 以 HERMES_SESSION_MAP 映射一卡通号）。
+            # 显式注入不受 _scrubbed_environ 的 RELAY_* 收敛影响（收敛只滤服务继承环境）。
             env["RELAY_TASK_USER"] = user
+        venv_bin = os.path.join(self.cfg.shared_venv
+                                or os.path.join(self.cfg.shared_dir, "venv"), "bin")
+        if os.path.isdir(venv_bin):
+            # 任务级 pip/python 落点：共享 venv 位于可写区（workspace/shared/venv），
+            # 裸 pip install 直接可用；系统/服务 venv 在沙箱下只读，装包碰不到中转运行时。
+            env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
         if self.cfg.engine == "claude":
             # root 下 claude 拒绝 --dangerously-skip-permissions，须声明沙箱环境；
             # 任务 HOME 本就物理隔离（workdir/home），语义相符。

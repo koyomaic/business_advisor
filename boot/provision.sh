@@ -143,7 +143,7 @@ chk_tools()    { command -v curl >/dev/null && command -v tar >/dev/null && comm
 ins_tools()    { pkg_install curl tar openssl; }
 chk_sqlite3()  { command -v sqlite3 >/dev/null 2>&1; }
 ins_sqlite3()  { pkg_install sqlite3; }
-chk_python3()  { command -v python3 >/dev/null && python3 -c 'import sys,venv; sys.exit(0 if sys.version_info>=(3,10) else 1)' 2>/dev/null; }
+chk_python3()  { command -v python3 >/dev/null && python3 -c 'import sys,venv,ensurepip; sys.exit(0 if sys.version_info>=(3,10) else 1)' 2>/dev/null; }
 ins_python3()  { pkg_install python3 python3-venv; }
 chk_node()     { command -v node >/dev/null && command -v npm >/dev/null && node -e 'process.exit(parseInt(process.versions.node)>=20?0:1)' 2>/dev/null; }
 ins_node()     {
@@ -474,6 +474,18 @@ fi
 step "workspace MCP配置"
 if [ -f "$WORKSPACE/opencode.json" ]; then ok
 else warn "缺失：含内网 MCP 地址不进 git，需要时从旧机拷贝 $WORKSPACE/opencode.json"; fi
+
+# ---------- 22b 共享任务 venv（任务级 pip 落点；relay.service 沙箱下系统/服务 venv 只读，SOFT） ----------
+step "共享任务venv"
+SHARED_VENV="$WORKSPACE/shared/venv"
+if [ -x "$SHARED_VENV/bin/pip" ]; then ok
+elif heal; then
+  miss "创建 $SHARED_VENV"
+  if python3 -m venv "$SHARED_VENV" >/dev/null 2>&1 \
+     && "$SHARED_VENV/bin/pip" install -q --upgrade pip -i "$PIP_MIRROR" >/dev/null 2>&1; then
+    ok "已创建（任务 PATH 前置，裸 pip install 即用）"
+  else warn "创建失败（任务 pip 需 --user 或自建 venv，不影响其余功能）"; fi
+else warn "缺失（install 模式自动创建）"; fi
 
 # ---------- 23 claude-proxy（可选组件，SOFT） ----------
 step "claude-proxy"

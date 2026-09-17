@@ -12,5 +12,20 @@ ExecStart=__VENV__/bin/python -m app.serve
 Restart=on-failure
 RestartSec=3
 
+# ---- 安全边界（2026-09-17 加固）：任务及其子进程 = 全盘只读 + 白名单可写区 + 关键凭据不可见 ----
+# 服务自身不受影响：relay.env 由 PID1 在命名空间建立前注入（EnvironmentFile）；TLS/代码只读即可。
+# 任务可写区：workspace 全区（tasks/users/shared 业务区，含 shared/venv 任务级 pip 落点）、/tmp、/var/tmp。
+# 硬边界效果：中转代码树/部署目录/系统配置只读（EROFS），relay.env 与 GitHub 凭据不可见（ENOENT）
+# → git 写操作、改单元、改配置、systemctl 控制在任务内物理不可行；例外只能由人在宿主机执行。
+# 路径前缀 "-" = 缺失时忽略，兼容机队差异。
+ProtectSystem=strict
+ReadWritePaths=-__WORKSPACE__ -/tmp -/var/tmp -/run/systemd/journal
+InaccessiblePaths=-__WORKSPACE__/relay.env -/root/.ssh -/root/.git-credentials -/root/.config/gh -/root/.claude -/root/.claude.json -/root/.claude-proxy
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
 [Install]
 WantedBy=multi-user.target

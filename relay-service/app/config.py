@@ -19,8 +19,10 @@ DEFAULT_BLOCKED_PATTERNS = [
     r"\bkill\s+(-9|-kill)\s+1(?!\d)",               # 杀 init（PID 1）
     r"\bchmod\s+-r\s+777\s+(?:~|/(?!\w))",          # 根/家目录递归 777
     # ---- 中转自身保护（2026-09-17 加固）----
-    r"\bgit\s+(push|commit|am|rebase|merge|reset|clean|tag|remote|cherry-pick|apply|format-patch|revert)\b",
-    r"\bsystemctl\s+(start|stop|restart|try-restart|reload|kill|enable|disable|mask|unmask|edit|daemon-reload|daemon-reexec|isolate|preset)\b",
+    # 选项跳跃组 (?:...)*?：覆盖 git -C <path> push / git -c k=v commit /
+    # systemctl --no-pager restart 等全局选项间隔写法（冒烟实测发现的绕过面）。
+    r"\bgit\s+(?:-{1,2}[a-z-]+(?:[= ]\S+)?\s+)*?(push|commit|am|rebase|merge|reset|clean|tag|remote|cherry-pick|apply|format-patch|revert)\b",
+    r"\bsystemctl\s+(?:--?\S+\s+)*?(start|stop|restart|try-restart|reload|kill|enable|disable|mask|unmask|edit|daemon-reload|daemon-reexec|isolate|preset)\b",
     r"\bservice\s+[\w.@-]+\s+(start|stop|restart|reload)\b",
     r"\b(pkill|killall)\s+.*\b(relay|app\.serve|uvicorn|claude-proxy)\b",
 ]

@@ -90,6 +90,15 @@ class Workspace:
         for t in task["targets"]:
             cur.update(_snap(self.resolve(t), self.cfg.workspace_root))
 
+        # dws 凭证种子（shared/secrets/dws-cli-seed/）的 token 轮换是基础设施状态
+        # （任务 HOME 软链原地刷新，见 shared_knowledge._symlink_dws_seed），非任务产出：
+        # 不排除会让触发刷新的 dws 任务误标 conflict，并引发跨任务伪冲突。
+        seed_rel = os.path.relpath(
+            os.path.join(self.cfg.shared_dir, "secrets", "dws-cli-seed"),
+            self.cfg.workspace_root) + os.sep
+        baseline = {k: v for k, v in baseline.items() if not k.startswith(seed_rel)}
+        cur = {k: v for k, v in cur.items() if not k.startswith(seed_rel)}
+
         created, modified, deleted = [], [], []
         for rel, meta in cur.items():
             if rel not in baseline:

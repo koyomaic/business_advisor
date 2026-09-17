@@ -131,3 +131,34 @@ def test_allowed_commands(tmp_path, cmd):
 def test_defaults_contain_self_protection():
     joined = "\n".join(DEFAULT_BLOCKED_PATTERNS)
     assert "git" in joined and "systemctl" in joined and "pkill" in joined
+
+
+# ---- 变更扫描：dws 种子 token 轮换不算任务改动（冒烟实测误标 conflict 修复）----
+
+def test_scan_excludes_dws_seed_rotation(tmp_path):
+    from app.workspace import Workspace
+
+    class _DB:
+        def set(self, *a, **k):
+            pass
+
+    cfg = _cfg(tmp_path)
+    seed = tmp_path / "shared" / "secrets" / "dws-cli-seed" / "dws-cli"
+    seed.mkdir(parents=True)
+    (seed / "auth-token_x.enc").write_text("old")
+    know = tmp_path / "shared" / "knowledge"
+    know.mkdir(parents=True)
+    (know / "a.md").write_text("v1")
+
+    ws = Workspace(cfg, _DB())
+    workdir = tmp_path / "tasks" / "1"
+    workdir.mkdir(parents=True)
+    task = {"id": 1, "workdir": str(workdir), "targets": []}
+    ws.prepare(task)
+
+    (seed / "auth-token_x.enc").write_text("rotated")   # 基础设施轮换
+    (know / "a.md").write_text("v2")                    # 任务真实产出
+
+    res = ws.scan(task)
+    assert "shared/knowledge/a.md" in res["all"]
+    assert not any("dws-cli-seed" in r for r in res["all"])
